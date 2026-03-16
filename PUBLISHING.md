@@ -87,6 +87,23 @@ When an external contributor opens a PR on GitHub:
 | `.github/workflows/ci.yml` | Present   | Present                   |
 | `PUBLISHING.md`    | Present            | Absent                    |
 
+## Version Tagging
+
+Tags follow a split scheme:
+
+- **`v0.1.0+internal`** — on `main`, pushed to GitLab. Triggers the package registry publish job.
+- **`v0.1.0`** — on `github-release`, pushed to GitHub. Clean version for external consumers.
+
+To tag a release:
+
+```bash
+git tag v0.1.0+internal main
+git push origin v0.1.0+internal
+
+git tag v0.1.0 github-release
+git push github v0.1.0
+```
+
 ## Publishing to PyPI
 
 ```bash
