@@ -1,0 +1,91 @@
+workflow:
+  name: CI
+
+stages:
+  - lint
+  - security
+  - test
+  - publish
+
+.fargate:
+  tags:
+    - fargate
+  before_script:
+    - pip3 install -r requirements.txt
+    - pip3 install -e ".[dev]"
+
+lint:
+  extends: .fargate
+  stage: lint
+  before_script:
+    - pip3 install ruff
+  script:
+    - ruff check . --output-format junit -o ruff-report.xml || true
+    - ruff check . --output-format grouped > ruff-report.txt 2>&1 || true
+    - ruff check .
+    - ruff format --check .
+  artifacts:
+    paths:
+      - ruff-report.txt
+    reports:
+      junit: ruff-report.xml
+    when: always
+
+mypy:
+  extends: .fargate
+  stage: lint
+  script:
+    - mypy pki_core
+
+bandit:
+  extends: .fargate
+  stage: security
+  before_script:
+    - pip3 install bandit
+  script:
+    - bandit -r pki_core -c pyproject.toml -f json -o bandit-report.json || true
+    - bandit -r pki_core -c pyproject.toml -f txt -o bandit-report.txt || true
+    - bandit -r pki_core -c pyproject.toml --severity-level high
+  artifacts:
+    paths:
+      - bandit-report.json
+      - bandit-report.txt
+    when: always
+
+pip-audit:
+  extends: .fargate
+  stage: security
+  before_script:
+    - pip3 install --upgrade pip setuptools
+    - pip3 install pip-audit
+    - pip3 install -r requirements.txt
+  script:
+    - pip-audit -r requirements.txt -f json -o pip-audit-report.json || true
+    - pip-audit -r requirements.txt
+  artifacts:
+    paths:
+      - pip-audit-report.json
+    when: always
+
+test:
+  extends: .fargate
+  stage: test
+  script:
+    - pytest --tb=short --junitxml=test-report.xml
+  artifacts:
+    reports:
+      junit: test-report.xml
+    when: always
+
+publish:
+  extends: .fargate
+  stage: publish
+  before_script:
+    - pip3 install build twine
+  script:
+    - python3 -m build
+    - TWINE_PASSWORD=${CI_JOB_TOKEN} TWINE_USERNAME=gitlab-ci-token
+      twine upload --repository-url ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/pypi dist/*
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: on_success
