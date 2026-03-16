@@ -38,7 +38,7 @@ def get_policy_oids(cert: x509.Certificate) -> list[str]:
     """Extract certificate policy OIDs."""
     try:
         ext = cert.extensions.get_extension_for_oid(ExtensionOID.CERTIFICATE_POLICIES)
-        return [p.policy_identifier.dotted_string for p in ext.value]
+        return [p.policy_identifier.dotted_string for p in ext.value]  # type: ignore[attr-defined]
     except x509.ExtensionNotFound:
         return []
 
@@ -47,7 +47,7 @@ def extract_email(cert: x509.Certificate) -> str | None:
     """Extract email from SAN (rfc822Name) or subject."""
     try:
         san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-        emails = san.value.get_values_for_type(x509.RFC822Name)
+        emails = san.value.get_values_for_type(x509.RFC822Name)  # type: ignore[attr-defined]
         if emails:
             return emails[0]
     except x509.ExtensionNotFound:
@@ -60,7 +60,7 @@ def extract_san_uris(cert: x509.Certificate) -> list[str]:
     """Extract URI values from Subject Alternative Name."""
     try:
         san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-        return list(san.value.get_values_for_type(x509.UniformResourceIdentifier))
+        return list(san.value.get_values_for_type(x509.UniformResourceIdentifier))  # type: ignore[attr-defined]
     except x509.ExtensionNotFound:
         return []
 
@@ -89,7 +89,7 @@ def extract_san_fascn(cert: x509.Certificate) -> str | None:
     """Extract FASC-N from SAN OtherName (OID 2.16.840.1.101.3.6.6)."""
     try:
         san = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
-        for general_name in san.value:
+        for general_name in san.value:  # type: ignore[attr-defined]
             if (
                 isinstance(general_name, x509.OtherName)
                 and general_name.type_id.dotted_string == "2.16.840.1.101.3.6.6"
