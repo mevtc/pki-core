@@ -1,8 +1,8 @@
-"""Tests for pki_core.providers."""
+"""Tests for pki.core.providers."""
 
 import pytest
 
-from pki_core.providers import AuthProvider, HeuristicRule, ProviderRegistry
+from pki.core.providers import AuthProvider, HeuristicRule, ProviderRegistry
 
 
 def _noop_parser(identity):

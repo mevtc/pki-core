@@ -1,6 +1,6 @@
-"""Tests for pki_core.validation."""
+"""Tests for pki.core.validation."""
 
-from pki_core.validation import (
+from pki.core.validation import (
     CertificatePolicy,
     ValidationStatus,
     validate_certificate,

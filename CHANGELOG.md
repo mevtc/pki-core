@@ -20,4 +20,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Origin
 
-Extracted from [federal-pki](https://github.com/mevtc/federal-pki) to provide a PKI-agnostic base library.
+Extracted from [pki-federal](https://github.com/mevtc/pki-federal) to provide a PKI-agnostic base library.

@@ -20,8 +20,8 @@ pip install pki-core
 ## Quick start
 
 ```python
-from pki_core.validation import validate_certificate, CertificatePolicy, ValidationStatus
-from pki_core.certificate import load_certificate
+from pki.core.validation import validate_certificate, CertificatePolicy, ValidationStatus
+from pki.core.certificate import load_certificate
 
 cert = load_certificate(pem_bytes)
 result = validate_certificate(cert)
@@ -37,9 +37,9 @@ elif result.status == ValidationStatus.REVOKED:
 ### With a custom provider
 
 ```python
-from pki_core.providers import AuthProvider, ProviderRegistry, HeuristicRule
-from pki_core.selectors import select_email_first
-from pki_core.validation import CertificatePolicy, validate_certificate
+from pki.core.providers import AuthProvider, ProviderRegistry, HeuristicRule
+from pki.core.selectors import select_email_first
+from pki.core.validation import CertificatePolicy, validate_certificate
 
 def parse_company_cn(identity):
     # Custom CN parsing logic
@@ -65,7 +65,7 @@ result = validate_certificate(cert, policy)
 
 ## For federal PKI
 
-Use [federal-pki](https://github.com/mevtc/federal-pki) which builds on pki-core with DoD CAC, Federal PIV, and ECA provider definitions.
+Use [pki-federal](https://github.com/mevtc/pki-federal) which builds on pki-core with DoD CAC, Federal PIV, and ECA provider definitions.
 
 ## License
 

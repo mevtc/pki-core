@@ -36,7 +36,7 @@ This project uses [ruff](https://docs.astral.sh/ruff/) for linting and formattin
 ```bash
 ruff check .
 ruff format .
-mypy pki_core/
+mypy src/pki/core/
 ```
 
 Pre-commit hooks will run these automatically on each commit.
@@ -44,7 +44,7 @@ Pre-commit hooks will run these automatically on each commit.
 ### Security Scanning
 
 ```bash
-bandit -r pki_core/
+bandit -r src/pki/core/
 pip-audit
 ```
 

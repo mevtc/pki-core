@@ -1,9 +1,9 @@
-"""Tests for pki_core.crl module."""
+"""Tests for pki.core.crl module."""
 
 import pytest
 
-from pki_core.certificate import CertificateError
-from pki_core.crl import (
+from pki.core.certificate import CertificateError
+from pki.core.crl import (
     CRLConfig,
     get_crl_distribution_points,
     get_crl_max_age,

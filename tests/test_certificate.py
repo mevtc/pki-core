@@ -1,10 +1,10 @@
-"""Tests for pki_core.certificate module."""
+"""Tests for pki.core.certificate module."""
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509.oid import NameOID
 
-from pki_core.certificate import (
+from pki.core.certificate import (
     CertificateError,
     cert_fingerprint,
     cert_to_pem,
@@ -126,11 +126,11 @@ class TestIsNotYetValid:
             .not_valid_after(datetime.datetime(2100, 1, 1, tzinfo=datetime.UTC))
             .sign(signer_key, hashes.SHA256())
         )
-        from pki_core.certificate import is_not_yet_valid
+        from pki.core.certificate import is_not_yet_valid
 
         assert is_not_yet_valid(cert) is True
 
     def test_current_cert_not_premature(self, cac_cert):
-        from pki_core.certificate import is_not_yet_valid
+        from pki.core.certificate import is_not_yet_valid
 
         assert is_not_yet_valid(cac_cert) is False
