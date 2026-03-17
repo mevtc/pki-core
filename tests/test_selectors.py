@@ -1,7 +1,7 @@
-"""Tests for pki_core.selectors."""
+"""Tests for pki.core.selectors."""
 
-from pki_core.identity import CertIdentity
-from pki_core.selectors import select_edipi_first, select_email_first, select_uuid_first
+from pki.core.identity import CertIdentity
+from pki.core.selectors import select_edipi_first, select_email_first, select_uuid_first
 
 
 class TestSelectEdipiFirst:

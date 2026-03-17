@@ -35,7 +35,7 @@ mypy:
   extends: .fargate
   stage: lint
   script:
-    - mypy pki_core
+    - mypy src/pki/core
 
 bandit:
   extends: .fargate
@@ -43,9 +43,9 @@ bandit:
   before_script:
     - pip3 install bandit
   script:
-    - bandit -r pki_core -c pyproject.toml -f json -o bandit-report.json || true
-    - bandit -r pki_core -c pyproject.toml -f txt -o bandit-report.txt || true
-    - bandit -r pki_core -c pyproject.toml --severity-level high
+    - bandit -r src/pki/core -c pyproject.toml -f json -o bandit-report.json || true
+    - bandit -r src/pki/core -c pyproject.toml -f txt -o bandit-report.txt || true
+    - bandit -r src/pki/core -c pyproject.toml --severity-level high
   artifacts:
     paths:
       - bandit-report.json

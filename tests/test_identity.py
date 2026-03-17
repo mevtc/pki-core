@@ -1,7 +1,7 @@
-"""Tests for pki_core.identity."""
+"""Tests for pki.core.identity."""
 
-from pki_core.identity import parse_identity
-from pki_core.providers import AuthProvider, ProviderRegistry
+from pki.core.identity import parse_identity
+from pki.core.providers import AuthProvider, ProviderRegistry
 
 
 def _test_parser(identity):

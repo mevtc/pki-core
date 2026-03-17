@@ -2,9 +2,15 @@
 requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
 [project]
 name = "pki-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Generic X.509 certificate utilities: parsing, CRL caching, identity extraction, provider registry, and validation pipeline."
 readme = "README.md"
 license = {text = "BSD-3-Clause"}
@@ -56,7 +62,7 @@ select = ["E", "W", "F", "I", "UP", "B", "SIM", "RUF"]
 ignore = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["pki_core"]
+known-first-party = ["pki"]
 
 [tool.ruff.format]
 quote-style = "double"
