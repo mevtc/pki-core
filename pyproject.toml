@@ -13,7 +13,7 @@ name = "pki-core"
 version = "0.2.0"
 description = "Generic X.509 certificate utilities: parsing, CRL caching, identity extraction, provider registry, and validation pipeline."
 readme = "README.md"
-license = {text = "BSD-3-Clause"}
+license = "BSD-3-Clause"
 requires-python = ">=3.11"
 authors = [
     {name = "MeV Technology Consulting, LLC"},
@@ -22,7 +22,7 @@ keywords = ["pki", "x509", "certificate", "crl", "identity", "validation"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: BSD License",
+
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
