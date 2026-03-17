@@ -87,6 +87,15 @@ When an external contributor opens a PR on GitHub:
 | `.github/workflows/ci.yml` | Present   | Present                   |
 | `PUBLISHING.md`    | Present            | Absent                    |
 
+## Pre-Release Checklist
+
+Before tagging a release:
+
+1. Update `CHANGELOG.md` with the new version, date, and summary of changes
+2. Bump the version in `pyproject.toml`
+3. Commit and push to `main`
+4. Wait for the GitLab CI pipeline to pass
+
 ## Version Tagging
 
 Tags follow a split scheme:
