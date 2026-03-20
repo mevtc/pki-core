@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `build_bundle_for_provider()` in `trust_store` — builds a PEM CA bundle for
+  a single provider's trust store sources. Enables per-provider bundles for
+  applications that need to know which provider matched (e.g., S/MIME milters
+  verifying against multiple PKIs).
+- Exported `build_bundle_for_provider` from `pki.core` public API.
+- Test suite for `trust_store` module (`test_trust_store.py`).
+
 ## [0.2.0] - 2026-03-17
 
 ### Changed

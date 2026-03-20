@@ -135,6 +135,50 @@ def merge_and_deduplicate(
     return "".join(pem_parts), stats
 
 
+def build_bundle_for_provider(
+    provider,
+    output_path: str | None = None,
+    filter_fn=None,
+) -> tuple[str, dict]:
+    """Fetch CA certificates for a single provider and build a PEM bundle.
+
+    Use this when you need per-provider bundles (e.g., a milter that verifies
+    against multiple PKIs and needs to know which one matched).
+
+    Args:
+        provider: An AuthProvider with trust_store_sources defined.
+        output_path: If provided, write the PEM bundle to this path.
+        filter_fn: Optional callable(cert) -> bool for filtering.
+
+    Returns:
+        Tuple of (pem_bundle_string, stats_dict).
+    """
+    cert_lists = []
+    for source in provider.trust_store_sources:
+        label = source.label or provider.name
+        try:
+            certs = fetch_trust_store_source(source)
+            logger.info("Fetched %d certs from %s (%s)", len(certs), source.url, label)
+            cert_lists.append((label, certs))
+        except Exception as e:
+            logger.error("Failed to fetch %s: %s", source.url, e)
+
+    if not cert_lists or not any(certs for _, certs in cert_lists):
+        raise RuntimeError(f"No certificates fetched from provider {provider.name!r}")
+
+    pem_bundle, stats = merge_and_deduplicate(cert_lists, filter_fn=filter_fn)
+
+    if output_path:
+        from pathlib import Path
+
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(pem_bundle)
+        logger.info("Provider bundle written to %s (%s)", output_path, provider.name)
+
+    return pem_bundle, stats
+
+
 def build_ca_bundle_for_providers(
     registry: ProviderRegistry,
     output_path: str | None = None,
