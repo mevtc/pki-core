@@ -195,7 +195,7 @@ physical, personnel) are out of scope.
 |---|---|---|
 | Detect unauthorized changes | CRL signature verification ensures CRLs are authentic and untampered | `crl.py:verify_crl()` |
 | | CA bundle integrity: trust store sources are HTTPS-only, with size limits (max_crl_bytes, 50 MB trust store limit) | `crl.py`, `trust_store.py` |
-| Software integrity | **Partial gap** — no release signing (GPG/Sigstore) for published packages | |
+| Software integrity | GitHub releases are signed with [Sigstore](https://www.sigstore.dev/) (keyless, OIDC-based). Signature bundles (`.sigstore.json`) are attached to each release and can be verified against the Sigstore transparency log | `.github/workflows/release.yml`, GitHub Releases |
 
 ### SI-10: Information Input Validation
 
@@ -245,13 +245,7 @@ physical, personnel) are out of scope.
 
 IA-2, IA-2(1), IA-2(2), IA-2(6), IA-2(12), IA-5, IA-5(2), IA-8, IA-8(1),
 SC-12, SC-13, SC-17, SC-23, SA-11, SA-11(1), SA-11(8), AU-2, AU-3, AU-6,
-SI-2, SI-10, SR-4, CM-7, CM-8
-
-### Controls partially addressed
-
-| Control | Gap |
-|---|---|
-| SI-7 | No release signing — packages are published unsigned |
+SI-2, SI-7, SI-10, SR-4, CM-7, CM-8
 
 ### Controls addressed at application level
 
