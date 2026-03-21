@@ -38,7 +38,7 @@ jobs:
       - run: pip install -e ".[dev]" bandit pip-audit cyclonedx-bom
       - run: bandit -r src/pki/core -c pyproject.toml --severity-level high
       - run: pip-audit
-      - run: cyclonedx-py environment -o sbom.cdx.json --format json
+      - run: cyclonedx-py environment -o sbom.cdx.json --of json
       - uses: actions/upload-artifact@v4
         with:
           name: sbom
