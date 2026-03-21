@@ -11,3 +11,4 @@ build/
 htmlcov/
 .venv/
 venv/
+.hypothesis/

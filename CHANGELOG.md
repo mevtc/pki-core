@@ -5,16 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.0] - 2026-03-21
 
 ### Added
 
+- `verify_chain()` function for RFC 5280 certificate path validation using
+  `cryptography.x509.verification.ClientVerifier`.
+- `CHAIN_UNTRUSTED` status in `ValidationStatus`.
+- `check_chain`, `trust_store`, and `intermediates` fields on `CertificatePolicy`.
+- `chain` field on `ValidationResult` — populated with the validated chain on success.
+- Chain validation as optional first step in `validate_certificate()` pipeline
+  (opt-in via `check_chain=True`; backward-compatible default is `False`).
+- Pluggable revocation checking via `RevocationCheck` ABC in `revocation.py`.
+  Built-in strategies: `CRL` (file-backed cache) and `OCSP` (live query to AIA
+  responder).
+- `RevocationPolicy` dataclass grouping strategy ordering, issuer certificates,
+  CRL cache config, and strictness into a single object.
+- `RevocationResult` enum: `GOOD`, `REVOKED`, `UNAVAILABLE`.
+- `run_revocation_checks()` pipeline runner with strict/non-strict fallback.
+- `AlgorithmPolicy` frozen dataclass in `algorithms.py` for cryptographic
+  algorithm enforcement (min RSA bits, allowed EC curves, allowed signature
+  hashes).
+- `check_algorithms()` function validates a certificate against a policy.
+- `ALGORITHM_NONCOMPLIANT` status in `ValidationStatus`.
+- `algorithm_policy` field on `CertificatePolicy` — opt-in (None by default).
+- `max_crl_bytes` field on `CRLConfig` — configurable maximum CRL response
+  size (default 10 MB).
+- `max_acceptable_age` field on `CRLConfig` — maximum age in seconds of a
+  cached CRL before it is force-refreshed synchronously instead of served stale.
 - `build_bundle_for_provider()` in `trust_store` — builds a PEM CA bundle for
-  a single provider's trust store sources. Enables per-provider bundles for
-  applications that need to know which provider matched (e.g., S/MIME milters
-  verifying against multiple PKIs).
-- Exported `build_bundle_for_provider` from `pki.core` public API.
-- Test suite for `trust_store` module (`test_trust_store.py`).
+  a single provider's trust store sources.
+- Exported `verify_chain`, `CRL`, `OCSP`, `RevocationCheck`, `RevocationPolicy`,
+  `RevocationResult`, `AlgorithmPolicy`, `build_bundle_for_provider` from
+  `pki.core` public API.
+- NIST SP 800-53 Rev 5 controls mapping (`SP800-53-CONTROLS.md`).
+- Hypothesis fuzz tests for certificate parsing, algorithms, revocation pipeline,
+  identity extraction, selectors, providers, CRL parsing, and trust store.
+- CycloneDX SBOM generation in CI.
+
+### Changed
+
+- `CertificatePolicy` revocation fields consolidated into `revocation:
+  RevocationPolicy | None`.  Replaces `check_revocation`, `revocation_checks`,
+  `issuer_certs`, and `crl_config`.  Set `revocation=None` to disable.
+- `RevocationCheck.check()` now accepts `(cert, policy)` instead of
+  `(cert, issuer_certs, config)`.
+- `run_revocation_checks()` now accepts `(policy, cert)` instead of
+  separate `checks`, `cert`, `issuer_certs`, `config`, `strict` arguments.
+- `refresh_crl()` now accepts a `CRLConfig` instead of a bare `timeout` int.
+- `CRLConfig` no longer has a module-level `MAX_CRL_BYTES` constant;
+  use `config.max_crl_bytes` instead.
 
 ## [0.2.0] - 2026-03-17
 

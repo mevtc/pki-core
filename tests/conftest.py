@@ -7,6 +7,15 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from hypothesis import settings
+
+# Hypothesis profiles for CI — use via: pytest --hypothesis-profile=ci
+settings.register_profile("default", max_examples=500)
+settings.register_profile("ci", max_examples=2000)
+settings.register_profile("nightly", max_examples=10000)
+settings.register_profile("stress", max_examples=50000)
+settings.register_profile("insane", max_examples=200000)
+settings.register_profile("stress", max_examples=50000)
 
 
 def _generate_key():
@@ -239,6 +248,336 @@ def wrong_ca_cert(wrong_ca_key):
         .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
         .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
         .sign(wrong_ca_key, hashes.SHA256())
+    )
+
+
+# ---------------------------------------------------------------------------
+# Chain validation fixtures — certs with full extensions required by
+# cryptography's RFC 5280 path validator (SKI, AKI, KeyUsage, SAN).
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session")
+def chain_ca_key():
+    return _generate_key()
+
+
+@pytest.fixture(scope="session")
+def chain_ca_cert(chain_ca_key):
+    """Self-signed root CA with extensions for chain validation."""
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test Chain Root CA"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Test Chain Root CA"),
+        ]
+    )
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(chain_ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(chain_ca_key.public_key()),
+            critical=False,
+        )
+        .sign(chain_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_intermediate_key():
+    return _generate_key()
+
+
+@pytest.fixture(scope="session")
+def chain_intermediate_cert(chain_ca_key, chain_ca_cert, chain_intermediate_key):
+    """Intermediate CA signed by chain_ca_cert."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Test Intermediate CA"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Test Intermediate CA"),
+        ]
+    )
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_ca_cert.subject)
+        .public_key(chain_intermediate_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(chain_intermediate_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_ca_key.public_key()),
+            critical=False,
+        )
+        .sign(chain_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_leaf_key():
+    return _generate_key()
+
+
+@pytest.fixture(scope="session")
+def chain_leaf_cert(chain_ca_key, chain_ca_cert, chain_leaf_key):
+    """Leaf certificate signed directly by chain_ca_cert."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "U.S. Government"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "CHAIN.TEST.USER.1234567890"),
+        ]
+    )
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_ca_cert.subject)
+        .public_key(chain_leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name("chain.test@mail.mil")]),
+            critical=False,
+        )
+        .sign(chain_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_leaf_via_intermediate_cert(
+    chain_intermediate_key, chain_intermediate_cert, chain_leaf_key
+):
+    """Leaf certificate signed by chain_intermediate_cert."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "U.S. Government"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "CHAIN.INTERMEDIATE.USER.9876543210"),
+        ]
+    )
+    leaf_key = _generate_key()
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_intermediate_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_intermediate_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name("intermediate.user@mail.mil")]),
+            critical=False,
+        )
+        .sign(chain_intermediate_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_untrusted_ca_key():
+    return _generate_key()
+
+
+@pytest.fixture(scope="session")
+def chain_untrusted_ca_cert(chain_untrusted_ca_key):
+    """Self-signed CA not in the trust store."""
+    subject = issuer = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "US"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Untrusted CA Inc"),
+            x509.NameAttribute(NameOID.COMMON_NAME, "Untrusted Root CA"),
+        ]
+    )
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(chain_untrusted_ca_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=False,
+                key_cert_sign=True,
+                crl_sign=True,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.SubjectKeyIdentifier.from_public_key(chain_untrusted_ca_key.public_key()),
+            critical=False,
+        )
+        .sign(chain_untrusted_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_leaf_from_untrusted(chain_untrusted_ca_key, chain_untrusted_ca_cert):
+    """Leaf signed by the untrusted CA."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "UNTRUSTED.LEAF.USER"),
+        ]
+    )
+    leaf_key = _generate_key()
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_untrusted_ca_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_untrusted_ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name("untrusted@example.com")]),
+            critical=False,
+        )
+        .sign(chain_untrusted_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def chain_expired_leaf(chain_ca_key, chain_ca_cert):
+    """Expired leaf certificate signed by chain_ca_cert."""
+    subject = x509.Name(
+        [
+            x509.NameAttribute(NameOID.COMMON_NAME, "EXPIRED.CHAIN.USER"),
+        ]
+    )
+    leaf_key = _generate_key()
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_ca_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2020, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2021, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True,
+                key_cert_sign=False,
+                crl_sign=False,
+                content_commitment=False,
+                key_encipherment=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name("expired@mail.mil")]),
+            critical=False,
+        )
+        .sign(chain_ca_key, hashes.SHA256())
     )
 
 

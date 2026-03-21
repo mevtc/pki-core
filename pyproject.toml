@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "pki-core"
-version = "0.2.0"
+version = "0.3.0"
 description = "Generic X.509 certificate utilities: parsing, CRL caching, identity extraction, provider registry, and validation pipeline."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -45,6 +45,7 @@ Changelog = "https://github.com/mevtc/pki-core/blob/main/CHANGELOG.md"
 dev = [
     "pytest>=8.0",
     "pytest-cov>=6.0",
+    "hypothesis>=6.100",
     "ruff>=0.9.0",
     "mypy>=1.14",
     "bandit>=1.8",

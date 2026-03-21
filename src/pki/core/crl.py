@@ -29,6 +29,26 @@ class CRLConfig:
     ``cache_dir`` defaults to the platform-standard user cache location
     based on ``app_name`` (e.g. ``~/.cache/pki-core/crls`` on Linux).
     Pass an explicit ``cache_dir`` to override.
+
+    Attributes:
+        app_name: Application name for default cache directory.
+        cache_dir: Explicit cache directory (overrides app_name default).
+        cache_ttl: Seconds before a cached CRL is considered stale and
+            triggers a background refresh.  The stale copy is still served
+            while refreshing.
+        strict: If True (default), raise ``CertificateError`` when a CRL
+            cannot be fetched or verified.  If False, log a warning and
+            allow the request.
+        fetch_timeout: HTTP fetch timeout in seconds.
+        max_crl_bytes: Maximum CRL response size in bytes.  Responses
+            larger than this are rejected.  Default is 10 MB; DoD CRLs
+            may require a higher limit.
+        max_acceptable_age: Maximum age in seconds of a cached CRL before
+            it is considered too old to trust, even as a stale fallback.
+            If a cached CRL exceeds this age and cannot be refreshed,
+            the check fails (in strict mode) rather than serving an
+            unacceptably stale copy.  Default is 0 (disabled — any cached
+            CRL is acceptable as a stale fallback).
     """
 
     app_name: str = "pki-core"
@@ -36,6 +56,8 @@ class CRLConfig:
     cache_ttl: int = 3600  # seconds
     strict: bool = True
     fetch_timeout: int = 10  # seconds
+    max_crl_bytes: int = 10 * 1024 * 1024  # 10 MB
+    max_acceptable_age: int = 0  # 0 = disabled
 
     def __post_init__(self):
         if not self.cache_dir:
@@ -204,6 +226,17 @@ def get_crl(url: str, config: CRLConfig) -> x509.CertificateRevocationList:
     if data is not None:
         if age < config.cache_ttl:
             return parse_crl_bytes(data)
+
+        # Cache is stale — check if it's too old to serve even as a fallback
+        if config.max_acceptable_age and age > config.max_acceptable_age:
+            logger.warning(
+                "CRL cache for %s is %.0fs old (max_acceptable_age=%d) -- forcing refresh",
+                url,
+                age,
+                config.max_acceptable_age,
+            )
+            return refresh_crl(url, cache_file, config)
+
         logger.debug(
             "CRL stale (%.0fs old) for %s -- serving cache, refreshing in background",
             age,
@@ -211,19 +244,16 @@ def get_crl(url: str, config: CRLConfig) -> x509.CertificateRevocationList:
         )
         threading.Thread(
             target=_refresh_crl_background,
-            args=(url, cache_file, config.fetch_timeout),
+            args=(url, cache_file, config),
             daemon=True,
         ).start()
         return parse_crl_bytes(data)
 
     logger.debug("No CRL cache for %s -- fetching synchronously", url)
-    return refresh_crl(url, cache_file, config.fetch_timeout)
+    return refresh_crl(url, cache_file, config)
 
 
-MAX_CRL_BYTES = 10 * 1024 * 1024  # 10 MB
-
-
-def _refresh_crl_background(url: str, cache_file: Path, timeout: int) -> None:
+def _refresh_crl_background(url: str, cache_file: Path, config: CRLConfig) -> None:
     """Wrapper for background CRL refresh that logs exceptions.
 
     Raises CRLRefreshError so that callers using a custom thread pool or
@@ -231,26 +261,30 @@ def _refresh_crl_background(url: str, cache_file: Path, timeout: int) -> None:
     usage, the exception is logged and then discarded.
     """
     try:
-        refresh_crl(url, cache_file, timeout)
+        refresh_crl(url, cache_file, config)
     except Exception as e:
         logger.error("Background CRL refresh failed for %s: %s", url, e)
         raise CRLRefreshError(f"Background CRL refresh failed for {url}: {e}") from e
 
 
-def refresh_crl(url: str, cache_file: Path, timeout: int = 10) -> x509.CertificateRevocationList:
+def refresh_crl(
+    url: str, cache_file: Path, config: CRLConfig | None = None
+) -> x509.CertificateRevocationList:
     """Fetch a CRL from url, write it to cache_file, and return parsed CRL.
 
     Called directly (blocking) when no cache exists, or from ``_refresh_crl_background``
     when the cache is stale.  Raises ``ValueError`` if the response exceeds
-    ``MAX_CRL_BYTES``.
+    ``config.max_crl_bytes``.
     """
+    if config is None:
+        config = CRLConfig()
     try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True)
+        resp = httpx.get(url, timeout=config.fetch_timeout, follow_redirects=True)
         resp.raise_for_status()
         data = resp.content
-        if len(data) > MAX_CRL_BYTES:
+        if len(data) > config.max_crl_bytes:
             raise ValueError(
-                f"CRL from {url} exceeds size limit ({len(data)} > {MAX_CRL_BYTES} bytes)"
+                f"CRL from {url} exceeds size limit ({len(data)} > {config.max_crl_bytes} bytes)"
             )
         crl = parse_crl_bytes(data)
         tmp = cache_file.with_suffix(".tmp")
@@ -307,7 +341,7 @@ def prefetch_crls(cert: x509.Certificate, config: CRLConfig) -> dict[str, str]:
                 results[url] = "skipped (fresh)"
                 continue
         try:
-            refresh_crl(url, cache_file, config.fetch_timeout)
+            refresh_crl(url, cache_file, config)
             results[url] = "refreshed"
         except Exception as e:
             results[url] = f"error: {e}"
