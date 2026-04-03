@@ -56,7 +56,6 @@ jobs:
         with:
           print-hash: true
 
-
   release:
     needs: sign
     runs-on: ubuntu-latest
