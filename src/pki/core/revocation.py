@@ -93,6 +93,7 @@ class CRLCheck(RevocationCheck):
         cert: x509.Certificate,
         policy: RevocationPolicy,
     ) -> tuple[RevocationResult, str]:
+        """Perform a CRL-based revocation check against distribution points."""
         try:
             _crl_check_revocation(cert, policy.crl_config, issuer_certs=policy.issuer_certs)
             return RevocationResult.GOOD, "CRL check passed"
@@ -105,6 +106,7 @@ class CRLCheck(RevocationCheck):
             return RevocationResult.UNAVAILABLE, msg
 
     def __repr__(self) -> str:
+        """Return string representation of the CRL check strategy."""
         return "CRL"
 
 
@@ -119,6 +121,7 @@ class OCSPCheck(RevocationCheck):
         cert: x509.Certificate,
         policy: RevocationPolicy,
     ) -> tuple[RevocationResult, str]:
+        """Perform an OCSP-based revocation check via AIA responder URLs."""
         urls = _get_ocsp_responder_urls(cert)
         if not urls:
             return RevocationResult.UNAVAILABLE, "No OCSP responder URL in AIA extension"
@@ -142,6 +145,7 @@ class OCSPCheck(RevocationCheck):
         return RevocationResult.UNAVAILABLE, f"All OCSP responders unavailable ({len(urls)} tried)"
 
     def __repr__(self) -> str:
+        """Return string representation of the OCSP check strategy."""
         return "OCSP"
 
 

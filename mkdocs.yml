@@ -1,0 +1,67 @@
+site_name: pki-core
+site_description: Generic X.509 certificate utilities for PKI-enabled applications
+repo_url: https://github.com/mevtc/pki-core
+repo_name: mevtc/pki-core
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.expand
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            members_order: source
+            merge_init_into_class: true
+            show_signature_annotations: true
+
+nav:
+  - Home: index.md
+  - Getting Started: quickstart.md
+  - API Reference:
+      - Overview: api/index.md
+      - Certificate: api/certificate.md
+      - Identity: api/identity.md
+      - Providers: api/providers.md
+      - Selectors: api/selectors.md
+      - Validation: api/validation.md
+      - Revocation: api/revocation.md
+      - Algorithms: api/algorithms.md
+      - CRL: api/crl.md
+      - Trust Store: api/trust_store.md
+  - Changelog: changelog.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - toc:
+      permalink: true

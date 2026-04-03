@@ -120,4 +120,5 @@ class ProviderRegistry:
         return None
 
     def __len__(self) -> int:
+        """Return the number of registered providers."""
         return len(self._providers)

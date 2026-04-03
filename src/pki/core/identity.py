@@ -43,6 +43,7 @@ class CertIdentity:
     policy_oids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
+        """Convert identity fields to a plain dictionary."""
         return {
             "primary_id": self.primary_id,
             "credential_type": self.credential_type,

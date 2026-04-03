@@ -60,6 +60,7 @@ class CRLConfig:
     max_acceptable_age: int = 0  # 0 = disabled
 
     def __post_init__(self):
+        """Apply defaults and validate configuration constraints."""
         if not self.cache_dir:
             self.cache_dir = str(Path(user_cache_dir(self.app_name)) / "crls")
 
