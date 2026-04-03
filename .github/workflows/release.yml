@@ -41,6 +41,22 @@ jobs:
           name: dist-signed
           path: dist/
 
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write       # trusted publishing OIDC token
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true
+
+
   release:
     needs: sign
     runs-on: ubuntu-latest
