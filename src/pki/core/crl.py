@@ -178,7 +178,7 @@ def check_revocation(
 
     for url in urls:
         try:
-            crl = get_crl(url, config)
+            crl = get_crl(url, config, issuer_certs=issuer_certs)
         except CertificateError:
             raise
         except Exception as e:
@@ -188,27 +188,29 @@ def check_revocation(
             logger.warning("strict=false -- allowing without revocation check for %s", url)
             continue
 
-        # Verify CRL signature if CA certs are available.
-        if issuer_certs is not None:
-            verify_crl(crl, issuer_certs, strict=config.strict)
-        else:
-            logger.debug(
-                "No issuer_certs provided; skipping CRL signature verification for %s", url
-            )
-
         if crl.get_revoked_certificate_by_serial_number(cert.serial_number) is not None:
             raise CertificateError(
                 f"Certificate has been revoked (serial {format(cert.serial_number, 'x')})"
             )
 
 
-def get_crl(url: str, config: CRLConfig) -> x509.CertificateRevocationList:
+def get_crl(
+    url: str,
+    config: CRLConfig,
+    issuer_certs: list[x509.Certificate] | None = None,
+) -> x509.CertificateRevocationList:
     """Return a parsed CRL for the given URL using a file-backed cache.
 
     Strategy (stale-while-revalidate):
       1. Fresh cache  -> return immediately.
       2. Stale cache  -> return stale copy; spawn background thread to refresh.
       3. No cache     -> fetch synchronously, cache result, return.
+
+    If *issuer_certs* is provided, the CRL signature and freshness are
+    verified on every load — including from cache.  This prevents a local
+    attacker with write access to the cache directory from substituting a
+    forged CRL.  Without *issuer_certs*, signature verification is skipped
+    (backward compatible).
     """
     cache_dir = Path(config.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -226,7 +228,10 @@ def get_crl(url: str, config: CRLConfig) -> x509.CertificateRevocationList:
 
     if data is not None:
         if age < config.cache_ttl:
-            return parse_crl_bytes(data)
+            crl = parse_crl_bytes(data)
+            if issuer_certs is not None:
+                verify_crl(crl, issuer_certs, strict=config.strict)
+            return crl
 
         # Cache is stale — check if it's too old to serve even as a fallback
         if config.max_acceptable_age and age > config.max_acceptable_age:
@@ -248,7 +253,10 @@ def get_crl(url: str, config: CRLConfig) -> x509.CertificateRevocationList:
             args=(url, cache_file, config),
             daemon=True,
         ).start()
-        return parse_crl_bytes(data)
+        crl = parse_crl_bytes(data)
+        if issuer_certs is not None:
+            verify_crl(crl, issuer_certs, strict=config.strict)
+        return crl
 
     logger.debug("No CRL cache for %s -- fetching synchronously", url)
     return refresh_crl(url, cache_file, config)

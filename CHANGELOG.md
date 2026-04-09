@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-04-08
+
+### Fixed
+
+- **Security**: `get_crl()` now verifies CRL signatures on cache load when
+  `issuer_certs` is provided, not just on fetch.  Previously, a cached CRL
+  was returned without signature verification, allowing an attacker with
+  write access to the cache directory to substitute a forged CRL that omits
+  revoked serials.  Cache directory permissions (0o700) and file permissions
+  (0o600) remain the primary defense; this adds defense-in-depth.
+
+### Changed
+
+- `get_crl()` accepts an optional `issuer_certs` parameter.  When provided,
+  CRL signature and freshness are verified on every load (cache hit or miss).
+- `check_revocation()` now passes `issuer_certs` through to `get_crl()`
+  instead of verifying the CRL separately after retrieval.
+
 ## [0.3.1] - 2026-04-03
 
 ### Added

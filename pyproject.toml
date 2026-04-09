@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "pki-core"
-version = "0.3.1"
+version = "0.3.2"
 description = "Generic X.509 certificate utilities: parsing, CRL caching, identity extraction, provider registry, and validation pipeline."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -20,7 +20,7 @@ authors = [
 ]
 keywords = ["pki", "x509", "certificate", "crl", "identity", "validation"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
 
     "Programming Language :: Python :: 3",
