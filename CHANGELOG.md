@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] - 2026-04-21
+
+### Security
+
+- Bump `cryptography` minimum from `>=44.0` to `>=46.0.7` to resolve
+  CVE-2026-26007 (ECDH small-subgroup key leakage), CVE-2026-34073
+  (DNS name constraint bypass), and CVE-2026-39892 (buffer overflow on
+  non-contiguous buffers).
+
 ## [0.3.3] - 2026-04-21
 
 ### Fixed

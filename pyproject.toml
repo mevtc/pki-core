@@ -10,7 +10,7 @@ where = ["src"]
 
 [project]
 name = "pki-core"
-version = "0.3.3"
+version = "0.3.4"
 description = "Generic X.509 certificate utilities: parsing, CRL caching, identity extraction, provider registry, and validation pipeline."
 readme = "README.md"
 license = "BSD-3-Clause"
@@ -30,7 +30,7 @@ classifiers = [
     "Topic :: Security :: Cryptography",
 ]
 dependencies = [
-    "cryptography>=44.0",
+    "cryptography>=46.0.7",
     "httpx>=0.27.0",
     "platformdirs>=4.0",
 ]
