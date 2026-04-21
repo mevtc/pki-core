@@ -307,6 +307,13 @@ def _query_ocsp(
             f"OCSP responder returned status {ocsp_response.response_status.name} ({url})",
         )
 
+    # Verify the OCSP response signature per RFC 6960 Section 3.2.
+    try:
+        _verify_ocsp_response_signature(ocsp_response, issuer)
+    except Exception as e:
+        logger.debug("OCSP response signature verification failed (%s): %s", url, e)
+        return RevocationResult.UNAVAILABLE, f"OCSP response signature invalid ({url}): {e}"
+
     cert_status = ocsp_response.certificate_status
     if cert_status == ocsp.OCSPCertStatus.GOOD:
         return RevocationResult.GOOD, f"OCSP: certificate is good ({url})"
@@ -315,3 +322,74 @@ def _query_ocsp(
 
     # UNKNOWN
     return RevocationResult.UNAVAILABLE, f"OCSP: certificate status unknown ({url})"
+
+
+def _verify_ocsp_response_signature(
+    ocsp_response: ocsp.OCSPResponse,
+    issuer: x509.Certificate,
+) -> None:
+    """Verify an OCSP response signature per RFC 6960 Section 3.2.
+
+    The response must be signed by either the issuer CA itself or by a
+    certificate issued by that CA with the id-kp-OCSPSigning EKU.
+
+    Raises ``CertificateError`` if the signature cannot be verified.
+    """
+    from cryptography.x509.oid import ExtendedKeyUsageOID
+
+    # Determine the responder's signing certificate.
+    responder_certs = ocsp_response.certificates
+    if responder_certs:
+        # Delegated responder — verify it was issued by the CA and has
+        # the id-kp-OCSPSigning EKU.
+        responder_cert = responder_certs[0]
+        try:
+            eku = responder_cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage)
+            if ExtendedKeyUsageOID.OCSP_SIGNING not in eku.value:
+                raise CertificateError("OCSP responder certificate lacks id-kp-OCSPSigning EKU")
+        except x509.ExtensionNotFound as e:
+            raise CertificateError("OCSP responder certificate has no EKU extension") from e
+        # Verify the responder cert was issued by the CA.
+        if responder_cert.issuer != issuer.subject:
+            raise CertificateError("OCSP responder certificate was not issued by the expected CA")
+        try:
+            _verify_signature(
+                issuer.public_key(),
+                responder_cert.signature,
+                responder_cert.tbs_certificate_bytes,
+                responder_cert.signature_hash_algorithm,
+            )
+        except Exception as e:
+            raise CertificateError(f"OCSP responder certificate signature invalid: {e}") from e
+        signing_key = responder_cert.public_key()
+    else:
+        # Response signed directly by the issuer CA.
+        signing_key = issuer.public_key()
+
+    # Verify the OCSP response signature itself.
+    try:
+        _verify_signature(
+            signing_key,
+            ocsp_response.signature,
+            ocsp_response.tbs_response_bytes,
+            ocsp_response.signature_hash_algorithm,
+        )
+    except Exception as e:
+        raise CertificateError(f"OCSP response signature verification failed: {e}") from e
+
+
+def _verify_signature(
+    public_key, signature: bytes, data: bytes, hash_algorithm: hashes.HashAlgorithm | None
+) -> None:
+    """Verify a signature using the correct algorithm for the key type."""
+    from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+
+    if hash_algorithm is None:
+        hash_algorithm = hashes.SHA256()
+
+    if isinstance(public_key, rsa.RSAPublicKey):
+        public_key.verify(signature, data, padding.PKCS1v15(), hash_algorithm)
+    elif isinstance(public_key, ec.EllipticCurvePublicKey):
+        public_key.verify(signature, data, ec.ECDSA(hash_algorithm))
+    else:
+        raise CertificateError(f"Unsupported OCSP responder key type: {type(public_key).__name__}")

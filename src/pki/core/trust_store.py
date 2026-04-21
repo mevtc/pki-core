@@ -7,6 +7,7 @@ from provider-defined trust store sources.
 import io
 import logging
 import zipfile
+from pathlib import Path
 
 import httpx
 from cryptography.hazmat.primitives.serialization.pkcs7 import (
@@ -20,7 +21,12 @@ from .providers import ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
-USER_AGENT = "pki-core/0.1"
+try:
+    from importlib.metadata import version as _pkg_version
+
+    USER_AGENT = f"pki-core/{_pkg_version('pki-core')}"
+except Exception:
+    USER_AGENT = "pki-core"
 
 MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
@@ -73,6 +79,13 @@ def _fetch_pkcs7_zip(url: str) -> list:
                 continue
             if ".." in name or name.startswith("/"):
                 logger.warning("Skipping suspicious ZIP entry: %s", name)
+                continue
+            # Guard against zip path traversal — ensure the resolved path
+            # stays within the current working directory.
+            target = Path(name).resolve()
+            cwd = Path.cwd().resolve()
+            if not str(target).startswith(str(cwd)):
+                logger.warning("Skipping zip entry with path traversal: %s", name)
                 continue
             p7_data = zf.read(name)
             try:
@@ -169,8 +182,6 @@ def build_bundle_for_provider(
     pem_bundle, stats = merge_and_deduplicate(cert_lists, filter_fn=filter_fn)
 
     if output_path:
-        from pathlib import Path
-
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(pem_bundle)
@@ -214,8 +225,6 @@ def build_ca_bundle_for_providers(
     pem_bundle, stats = merge_and_deduplicate(cert_lists, filter_fn=filter_fn)
 
     if output_path:
-        from pathlib import Path
-
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(pem_bundle)

@@ -95,8 +95,10 @@ def extract_san_fascn(cert: x509.Certificate) -> str | None:
                 and general_name.type_id.dotted_string == "2.16.840.1.101.3.6.6"
             ):
                 return general_name.value.hex()
-    except (x509.ExtensionNotFound, Exception):
+    except x509.ExtensionNotFound:
         pass
+    except Exception:
+        logger.warning("Unexpected error extracting FASC-N from SAN", exc_info=True)
     return None
 
 

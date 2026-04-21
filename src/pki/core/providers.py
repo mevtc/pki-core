@@ -63,22 +63,25 @@ class ProviderRegistry:
     """
 
     _providers: dict[str, AuthProvider] = field(default_factory=dict)
+    _compiled_patterns: dict[str, dict[str, re.Pattern]] = field(default_factory=dict, repr=False)
 
     def register(self, provider: AuthProvider) -> None:
         """Add or replace a provider.
 
-        Validates regex patterns in heuristic rules at registration time.
-        Pattern complexity is the caller's responsibility.
+        Validates and pre-compiles regex patterns in heuristic rules at
+        registration time.  Pattern complexity is the caller's responsibility.
         """
+        compiled: dict[str, re.Pattern] = {}
         for rule in provider.heuristics:
             if rule.is_regex:
                 try:
-                    re.compile(rule.pattern)
+                    compiled[rule.pattern] = re.compile(rule.pattern)
                 except re.error as e:
                     raise ValueError(
                         f"Invalid regex in heuristic for provider {provider.name!r}: {e}"
                     ) from e
         self._providers[provider.name] = provider
+        self._compiled_patterns[provider.name] = compiled
 
     def get(self, name: str) -> AuthProvider | None:
         """Look up a provider by name."""
@@ -107,12 +110,14 @@ class ProviderRegistry:
     ) -> AuthProvider | None:
         """Return the first provider matched by heuristic rules."""
         for provider in self._providers.values():
+            compiled = self._compiled_patterns.get(provider.name, {})
             for rule in provider.heuristics:
                 value = {"cn": cn, "org": org, "ou": ou}.get(rule.field)
                 if value is None:
                     continue
                 if rule.is_regex:
-                    if re.match(rule.pattern, value):
+                    pat = compiled.get(rule.pattern)
+                    if pat and pat.match(value):
                         return provider
                 else:
                     if rule.pattern in value.lower():

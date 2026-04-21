@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] - 2026-04-21
+
+### Fixed
+
+- **Security**: OCSP response signature is now verified per RFC 6960 Section
+  3.2.  Previously, `_query_ocsp` trusted the parsed response status without
+  verifying the response was signed by the issuer CA or a delegated OCSP
+  responder with the id-kp-OCSPSigning EKU.  Supports both direct issuer
+  signing and delegated responder certificates.
+- **Security**: `prefetch_crls()` now creates the cache directory with
+  `mode=0o700`, matching the permissions already used by `get_crl()`.
+- **Security**: Hardened zip path traversal guard in `_fetch_pkcs7_zip()` to
+  resolve extracted paths and verify they stay under the working directory.
+- `extract_san_fascn()` now logs unexpected exceptions instead of silently
+  swallowing them with a bare `except Exception`.
+
+### Changed
+
+- `ProviderRegistry.register()` pre-compiles regex patterns at registration
+  time.  `match_heuristic()` uses cached compiled patterns instead of
+  recompiling on every call.
+- `USER_AGENT` in `trust_store.py` now reads the installed package version
+  from `importlib.metadata` instead of a hardcoded string.
+
 ## [0.3.2] - 2026-04-08
 
 ### Fixed
@@ -28,7 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Automated PyPI publishing via trusted publisher (OIDC) in release workflow.
-
 
 ## [0.3.0] - 2026-03-21
 

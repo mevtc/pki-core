@@ -338,7 +338,7 @@ def prefetch_crls(cert: x509.Certificate, config: CRLConfig) -> dict[str, str]:
         return {}
 
     cache_dir = Path(config.cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     results: dict[str, str] = {}
 
     for url in urls:
