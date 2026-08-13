@@ -6,7 +6,7 @@ import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from hypothesis import settings
 
 # Hypothesis profiles for CI — use via: pytest --hypothesis-profile=ci
@@ -578,6 +578,86 @@ def chain_expired_leaf(chain_ca_key, chain_ca_cert):
             critical=False,
         )
         .sign(chain_ca_key, hashes.SHA256())
+    )
+
+
+def _chain_leaf_with_eku(chain_ca_key, chain_ca_cert, cn, email, ekus, key_encipherment=False):
+    """Build a leaf signed by chain_ca_cert carrying a specific EKU set."""
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+    leaf_key = _generate_key()
+    return (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(chain_ca_cert.subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime(2024, 1, 1, tzinfo=datetime.UTC))
+        .not_valid_after(datetime.datetime(2030, 1, 1, tzinfo=datetime.UTC))
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=not key_encipherment,
+                content_commitment=not key_encipherment,
+                key_encipherment=key_encipherment,
+                key_cert_sign=False,
+                crl_sign=False,
+                data_encipherment=False,
+                key_agreement=False,
+                encipher_only=False,
+                decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(x509.ExtendedKeyUsage(ekus), critical=False)
+        .add_extension(
+            x509.AuthorityKeyIdentifier.from_issuer_public_key(chain_ca_key.public_key()),
+            critical=False,
+        )
+        .add_extension(
+            x509.SubjectAlternativeName([x509.RFC822Name(email)]),
+            critical=False,
+        )
+        .sign(chain_ca_key, hashes.SHA256())
+    )
+
+
+@pytest.fixture(scope="session")
+def smime_encryption_leaf(chain_ca_key, chain_ca_cert):
+    """S/MIME encryption cert: keyEncipherment + emailProtection only.
+
+    Mirrors the real ECA/CAC email encryption profile, which asserts no
+    clientAuth EKU.
+    """
+    return _chain_leaf_with_eku(
+        chain_ca_key,
+        chain_ca_cert,
+        "SMIME.ENCRYPTION.USER",
+        "smime.enc@mail.mil",
+        [ExtendedKeyUsageOID.EMAIL_PROTECTION],
+        key_encipherment=True,
+    )
+
+
+@pytest.fixture(scope="session")
+def smime_signing_leaf(chain_ca_key, chain_ca_cert):
+    """S/MIME signing cert: clientAuth + emailProtection (ECA signing profile)."""
+    return _chain_leaf_with_eku(
+        chain_ca_key,
+        chain_ca_cert,
+        "SMIME.SIGNING.USER",
+        "smime.sig@mail.mil",
+        [ExtendedKeyUsageOID.CLIENT_AUTH, ExtendedKeyUsageOID.EMAIL_PROTECTION],
+    )
+
+
+@pytest.fixture(scope="session")
+def server_auth_leaf(chain_ca_key, chain_ca_cert):
+    """Leaf asserting serverAuth only — matches neither clientAuth nor emailProtection."""
+    return _chain_leaf_with_eku(
+        chain_ca_key,
+        chain_ca_cert,
+        "SERVER.AUTH.HOST",
+        "server@mail.mil",
+        [ExtendedKeyUsageOID.SERVER_AUTH],
     )
 
 

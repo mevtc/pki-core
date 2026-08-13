@@ -5,6 +5,91 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-08-11
+
+Note for anyone upgrading from PyPI: 0.4.0 was tagged but never published,
+so 0.3.4 is the previous release on PyPI and the 0.4.0 notes below apply to
+this upgrade as well.
+
+### Fixed
+
+- **Chain validation no longer rejects S/MIME encryption certificates.**
+  `verify_chain()` builds `cryptography`'s `ClientVerifier`, whose default
+  end-entity extension policy hard-codes an `id-kp-clientAuth` requirement.
+  Any certificate asserting an EKU that omits `clientAuth` failed path
+  validation with `required EKU not found` — including every S/MIME
+  encryption certificate, which asserts `id-kp-emailProtection` alone by
+  profile (DoD CAC and ECA email encryption certificates both do).
+  Callers saw `CHAIN_UNTRUSTED` for a perfectly valid certificate.
+
+  A certificate carrying **no** EKU extension remains unrestricted per
+  RFC 5280 §4.2.1.12 — which is why the existing chain fixtures, none of
+  which asserted an EKU, never caught this.
+
+### Added
+
+- `expected_eku` parameter on `verify_chain()` and matching field on
+  `CertificatePolicy`.  Defaults to `ExtendedKeyUsageOID.CLIENT_AUTH`,
+  preserving existing behaviour for authentication callers.  Set to
+  `ExtendedKeyUsageOID.EMAIL_PROTECTION` for S/MIME, or `None` to skip
+  the EKU check.
+
+  ```python
+  from cryptography.x509.oid import ExtendedKeyUsageOID
+
+  policy = CertificatePolicy(
+      check_chain=True,
+      trust_store=ca_certs,
+      expected_eku=ExtendedKeyUsageOID.EMAIL_PROTECTION,
+  )
+  ```
+
+  Implemented via `PolicyBuilder.extension_policies()`, retaining
+  `webpki_defaults_ca()` and `webpki_defaults_ee()` for every other
+  extension check rather than relaxing end-entity validation wholesale.
+
+### Changed
+
+- Documented the EKU requirement in the `verify_chain()` docstring and the
+  module-level validation boundary.  The previous description of what
+  `ClientVerifier` checks omitted EKU entirely.
+
+## [0.4.0] - 2026-07-16
+
+### Added
+
+- `IntendedUse` Flag enum declaring what a provider's certificates are
+  approved for: `PERSONAL_AUTH`, `NPE_AUTH`, `OBJECT_SIGNING`,
+  `ENCRYPTION`, `TIMESTAMPING`.  A provider may set multiple bits
+  when a single policy genuinely permits multiple uses.
+- `intended_use` field on `AuthProvider` (defaults to
+  `IntendedUse.PERSONAL_AUTH` for backward compatibility).
+- `intended_use` constructor parameter on `ProviderRegistry`.  When
+  set, `register()` refuses any provider whose `intended_use` does
+  not include the constrained bits, turning mis-composition into a
+  definition-time `ValueError` instead of a silent runtime security
+  boundary violation.
+
+  Consumers enforce intent at the boundary using set membership:
+
+      if IntendedUse.PERSONAL_AUTH not in provider.intended_use:
+          raise AuthError(...)
+
+- `IntendedUse` is now exported from the top-level `pki.core` package.
+- `intended_use` field on `CertIdentity`, populated by `parse_identity()`
+  from the matched provider. Informational only — `parse_identity()`
+  does not reject a cert based on this value; callers that need to
+  enforce a use must check the field themselves or pass a constrained
+  `ProviderRegistry`.
+
+### Fixed
+
+- `parse_identity` no longer falls back to "the last registered provider"
+  when both OID and heuristic matching fail.  That fallback was
+  registration-order-dependent and silently mislabeled certs from
+  unrecognized issuers.  When neither match succeeds, `credential_type`
+  is now `"UNKNOWN"`, regardless of how many providers are registered.
+
 ## [0.3.4] - 2026-04-21
 
 ### Security

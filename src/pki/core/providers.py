@@ -10,10 +10,32 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Flag, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .identity import CertIdentity
+
+
+class IntendedUse(Flag):
+    """Capability flags declaring what a credential class is approved for.
+
+    A provider may set multiple bits when a single policy genuinely
+    permits multiple uses (e.g. FPKI common-hardware allows personal
+    authentication and digital signature on the same cert).  Consumers
+    enforce intent at the security boundary using set membership:
+
+        if IntendedUse.PERSONAL_AUTH not in provider.intended_use:
+            raise AuthError(...)
+
+    New flags may be added without restructuring existing providers.
+    """
+
+    PERSONAL_AUTH = auto()  # Human signing in or signing as themselves
+    NPE_AUTH = auto()  # Non-Person Entity (service/device) authentication
+    OBJECT_SIGNING = auto()  # Content / code / document signing at scale
+    ENCRYPTION = auto()  # Key transport / encipherment
+    TIMESTAMPING = auto()  # Time-stamp authority signing
 
 
 @dataclass(frozen=True)
@@ -52,6 +74,7 @@ class AuthProvider:
     email_signing_oids: frozenset[str] = frozenset()
     min_aal: int = 2
     controls: tuple[str, ...] = ()
+    intended_use: IntendedUse = IntendedUse.PERSONAL_AUTH
 
 
 @dataclass
@@ -60,8 +83,15 @@ class ProviderRegistry:
 
     Providers are matched in insertion order: the first provider whose
     auth_oids intersect the certificate's policy OIDs wins.
+
+    A registry may be constrained to a specific IntendedUse at
+    construction time.  When constrained, register() refuses any
+    provider whose intended_use does not include the constraint —
+    making mis-composition a definition-time error rather than a
+    runtime security boundary violation.
     """
 
+    intended_use: IntendedUse | None = None
     _providers: dict[str, AuthProvider] = field(default_factory=dict)
     _compiled_patterns: dict[str, dict[str, re.Pattern]] = field(default_factory=dict, repr=False)
 
@@ -70,7 +100,16 @@ class ProviderRegistry:
 
         Validates and pre-compiles regex patterns in heuristic rules at
         registration time.  Pattern complexity is the caller's responsibility.
+
+        If the registry was constructed with an intended_use constraint,
+        the provider's intended_use must include all constrained bits.
         """
+        if self.intended_use is not None and self.intended_use not in provider.intended_use:
+            raise ValueError(
+                f"Provider {provider.name!r} (intended_use={provider.intended_use!r}) "
+                f"does not support {self.intended_use!r}; "
+                f"this registry refuses providers missing the constrained bits"
+            )
         compiled: dict[str, re.Pattern] = {}
         for rule in provider.heuristics:
             if rule.is_regex:

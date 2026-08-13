@@ -21,7 +21,11 @@ pki-core handles:
 
 - **RFC 5280 chain validation** via ``verify_chain()`` — signature verification,
   validity period of all certs in the chain, basic constraints, path length,
-  key usage, and name constraints.
+  key usage, name constraints, and Extended Key Usage.  The required EKU is
+  configurable via ``expected_eku`` and defaults to ``id-kp-clientAuth``;
+  set it to ``id-kp-emailProtection`` for S/MIME or ``None`` to skip the
+  check.  A certificate carrying no EKU extension is unrestricted per
+  RFC 5280 and satisfies any ``expected_eku``.
 - **Identity extraction** — CN parsing, SAN fields (FASC-N, UUID, email),
   policy OID identification, and primary ID selection.
 - **Validity period checks** — explicit ``is_expired`` / ``is_not_yet_valid``.
@@ -57,7 +61,14 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 
 from cryptography import x509
-from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
+from cryptography.x509.oid import ExtendedKeyUsageOID
+from cryptography.x509.verification import (
+    Criticality,
+    ExtensionPolicy,
+    PolicyBuilder,
+    Store,
+    VerificationError,
+)
 
 from .algorithms import AlgorithmPolicy, check_algorithms
 from .certificate import CertificateError, is_expired, is_not_yet_valid
@@ -105,6 +116,15 @@ class CertificatePolicy:
 
         # No revocation checking
         CertificatePolicy(revocation=None)
+
+        # S/MIME: encryption certificates assert emailProtection alone
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        CertificatePolicy(
+            check_chain=True,
+            trust_store=ca_certs,
+            expected_eku=ExtendedKeyUsageOID.EMAIL_PROTECTION,
+        )
     """
 
     check_chain: bool = False
@@ -114,6 +134,7 @@ class CertificatePolicy:
     registry: ProviderRegistry | None = None
     trust_store: list[x509.Certificate] | None = None
     intermediates: list[x509.Certificate] | None = None
+    expected_eku: x509.ObjectIdentifier | None = ExtendedKeyUsageOID.CLIENT_AUTH
 
 
 @dataclass
@@ -126,10 +147,55 @@ class ValidationResult:
     chain: list[x509.Certificate] | None = None
 
 
+def _build_ee_extension_policy(
+    expected_eku: x509.ObjectIdentifier | None,
+) -> ExtensionPolicy:
+    """Build an end-entity extension policy enforcing ``expected_eku``.
+
+    Starts from ``webpki_defaults_ee()`` so every other end-entity extension
+    check (key usage, basic constraints, SAN handling) is retained, and
+    replaces only the Extended Key Usage rule.
+
+    ``cryptography``'s ``ClientVerifier`` hard-codes an ``id-kp-clientAuth``
+    requirement in its default end-entity extension policy.  That is correct
+    for TLS client authentication and wrong for every other use of an X.509
+    certificate -- notably S/MIME encryption certificates, which assert
+    ``id-kp-emailProtection`` alone.
+
+    Args:
+        expected_eku: EKU OID the end-entity certificate must assert, or
+            ``None`` to accept any EKU (the extension may still be present).
+
+    Returns:
+        An :class:`ExtensionPolicy` for end-entity certificates.
+    """
+    base = ExtensionPolicy.webpki_defaults_ee()
+
+    if expected_eku is None:
+        return base.may_be_present(x509.ExtendedKeyUsage, Criticality.AGNOSTIC, None)
+
+    def _validate_eku(
+        policy: object,
+        cert: x509.Certificate,
+        ext: x509.ExtendedKeyUsage | None,
+    ) -> None:
+        # An absent EKU is unrestricted per RFC 5280 -- only reject when the
+        # extension is present and omits the required usage.
+        if ext is not None and expected_eku not in ext:
+            asserted = ", ".join(oid.dotted_string for oid in ext) or "none"
+            raise ValueError(
+                f"required EKU {expected_eku.dotted_string} not asserted "
+                f"by end-entity certificate (asserts: {asserted})"
+            )
+
+    return base.may_be_present(x509.ExtendedKeyUsage, Criticality.AGNOSTIC, _validate_eku)
+
+
 def verify_chain(
     cert: x509.Certificate,
     trust_store: list[x509.Certificate],
     intermediates: list[x509.Certificate] | None = None,
+    expected_eku: x509.ObjectIdentifier | None = ExtendedKeyUsageOID.CLIENT_AUTH,
 ) -> list[x509.Certificate]:
     """Verify a certificate chain per RFC 5280.
 
@@ -142,6 +208,11 @@ def verify_chain(
         trust_store: Trusted root CA certificates.
         intermediates: Intermediate CA certificates (may be empty when the
             leaf is issued directly by a root).
+        expected_eku: Extended Key Usage OID the end-entity certificate must
+            assert if it carries an EKU extension.  Defaults to
+            ``ExtendedKeyUsageOID.CLIENT_AUTH`` for TLS client authentication.
+            Pass ``ExtendedKeyUsageOID.EMAIL_PROTECTION`` for S/MIME, or
+            ``None`` to skip the EKU check entirely.
 
     Returns:
         The validated certificate chain from leaf to root.
@@ -149,6 +220,11 @@ def verify_chain(
     Raises:
         CertificateError: If the chain cannot be validated or the trust
             store is empty.
+
+    Note:
+        A certificate with **no** EKU extension is unrestricted per RFC 5280
+        and passes any ``expected_eku``.  The check rejects only certificates
+        that carry an EKU omitting the required usage.
 
     Note:
         This does **not** enforce certificate policy OID constraints.
@@ -160,7 +236,15 @@ def verify_chain(
         raise CertificateError("trust_store is empty; cannot verify chain")
 
     store = Store(trust_store)
-    verifier = PolicyBuilder().store(store).build_client_verifier()
+    verifier = (
+        PolicyBuilder()
+        .store(store)
+        .extension_policies(
+            ca_policy=ExtensionPolicy.webpki_defaults_ca(),
+            ee_policy=_build_ee_extension_policy(expected_eku),
+        )
+        .build_client_verifier()
+    )
     try:
         result = verifier.verify(cert, intermediates or [])
         return list(result.chain)
@@ -202,7 +286,12 @@ def validate_certificate(
             result.error = "check_chain is enabled but no trust_store was provided"
             return result
         try:
-            result.chain = verify_chain(cert, policy.trust_store, policy.intermediates)
+            result.chain = verify_chain(
+                cert,
+                policy.trust_store,
+                policy.intermediates,
+                expected_eku=policy.expected_eku,
+            )
         except CertificateError as e:
             # Still extract identity for logging before returning
             with contextlib.suppress(Exception):

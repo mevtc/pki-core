@@ -2,7 +2,7 @@
 
 import pytest
 
-from pki.core.providers import AuthProvider, HeuristicRule, ProviderRegistry
+from pki.core.providers import AuthProvider, HeuristicRule, IntendedUse, ProviderRegistry
 
 
 def _noop_parser(identity):
@@ -86,3 +86,56 @@ class TestProviderRegistry:
         assert len(reg) == 0
         assert reg.match_oids({"1.2.3"}) is None
         assert reg.all() == []
+
+
+class TestIntendedUseConstraint:
+    def _provider(self, name: str, intended_use: IntendedUse) -> AuthProvider:
+        return AuthProvider(
+            name=name,
+            display_name=name,
+            auth_oids=frozenset({"1.2.3"}),
+            cn_parser=_noop_parser,
+            primary_id_selector=_dn_selector,
+            intended_use=intended_use,
+        )
+
+    def test_default_intended_use_is_personal_auth(self):
+        provider = AuthProvider(
+            name="DEFAULT",
+            display_name="Default",
+            auth_oids=frozenset(),
+            cn_parser=_noop_parser,
+            primary_id_selector=_dn_selector,
+        )
+        assert provider.intended_use is IntendedUse.PERSONAL_AUTH
+
+    def test_unconstrained_registry_accepts_anything(self):
+        reg = ProviderRegistry()
+        reg.register(self._provider("PE", IntendedUse.PERSONAL_AUTH))
+        reg.register(self._provider("CS", IntendedUse.OBJECT_SIGNING))
+        assert len(reg) == 2
+
+    def test_constrained_registry_accepts_matching(self):
+        reg = ProviderRegistry(intended_use=IntendedUse.PERSONAL_AUTH)
+        reg.register(self._provider("PE", IntendedUse.PERSONAL_AUTH))
+        assert len(reg) == 1
+
+    def test_constrained_registry_rejects_mismatched(self):
+        reg = ProviderRegistry(intended_use=IntendedUse.PERSONAL_AUTH)
+        cs = self._provider("CS", IntendedUse.OBJECT_SIGNING)
+        with pytest.raises(ValueError, match="does not support"):
+            reg.register(cs)
+
+    def test_constrained_registry_accepts_multi_use_provider(self):
+        """Provider with multiple bits set passes if constraint bits are present."""
+        reg = ProviderRegistry(intended_use=IntendedUse.PERSONAL_AUTH)
+        multi = self._provider("MULTI", IntendedUse.PERSONAL_AUTH | IntendedUse.OBJECT_SIGNING)
+        reg.register(multi)
+        assert len(reg) == 1
+
+    def test_intended_use_set_membership(self):
+        """The boundary check authn-* will use."""
+        pe_only = self._provider("PE", IntendedUse.PERSONAL_AUTH)
+        cs_only = self._provider("CS", IntendedUse.OBJECT_SIGNING)
+        assert IntendedUse.PERSONAL_AUTH in pe_only.intended_use
+        assert IntendedUse.PERSONAL_AUTH not in cs_only.intended_use

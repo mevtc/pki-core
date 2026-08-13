@@ -12,9 +12,54 @@ timelines, and disclosure policy, see
 
 | Version | Supported |
 | ------- | --------- |
-| 0.3.x   | Yes       |
+| 0.5.x   | Yes       |
+| 0.4.x   | No        |
+| 0.3.x   | No        |
 | 0.2.x   | No        |
 | 0.1.x   | No        |
+
+0.4.x was tagged internally but never published to PyPI; it is listed only
+so the sequence is unambiguous. 0.3.4 was the previous release on PyPI —
+upgrade to 0.5.x to remain on a supported version.
+
+## Security Boundaries
+
+pki-core performs cryptographic and structural certificate operations, but
+several security-relevant checks are **opt-in** rather than on-by-default,
+in order to keep zero-configuration parsing and validation usable. Calling
+applications with security-sensitive requirements must explicitly configure
+or independently verify the following:
+
+- **Chain validation is opt-in.** `CertificatePolicy` defaults to
+  `check_chain=False`. Without `check_chain=True` and a trust anchor,
+  `validate_certificate()` performs no trust-path enforcement at all.
+
+- **CRL signature verification is opt-in.** `RevocationPolicy` defaults to
+  `issuer_certs=None`, which skips CRL signature verification entirely.
+  Pass `issuer_certs` explicitly to have fetched CRLs authenticated against
+  known CA certificates before being trusted.
+
+- **A missing CRL distribution point is treated as "not revoked," not
+  "unknown."** A certificate with no CRL DP currently reports revocation
+  status as GOOD rather than UNAVAILABLE. This also means `strict=True`
+  fail-closed behavior is never reached for such certificates.
+
+- **OCSP responses have no freshness or replay protection.** Responses are
+  not checked against `this_update`/`next_update`, and requests do not
+  include a nonce. A captured GOOD response can be replayed after the
+  underlying certificate is revoked.
+
+- **Revocation and trust-store URL fetches are not SSRF-hardened.** CRL,
+  OCSP, and trust-store download requests follow redirects and do not
+  block private-IP, link-local, or cloud metadata-endpoint targets, and
+  CRL/OCSP URLs are taken directly from the certificate under validation.
+  Applications embedding this library in an internet-facing service should
+  apply their own egress controls (network policy, URL allow-listing, or a
+  proxy that blocks internal address ranges) around these fetches.
+
+See the `## Security` section of `TODO.md` for the full list of tracked
+issues and [`docs/adr/0001-revocation-fail-open-by-default.md`](docs/adr/0001-revocation-fail-open-by-default.md)
+for the rationale behind the current fail-open revocation defaults.
 
 ## Security Testing
 

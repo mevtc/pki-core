@@ -18,7 +18,7 @@ from .certificate import (
     get_name_attr,
     get_policy_oids,
 )
-from .providers import ProviderRegistry
+from .providers import IntendedUse, ProviderRegistry
 
 
 @dataclass
@@ -27,6 +27,11 @@ class CertIdentity:
 
     primary_id: str | None = None
     credential_type: str | None = None
+    # Informational only — parse_identity() does not reject a cert whose
+    # matched provider's intended_use is unexpected. Callers that need to
+    # enforce a use (e.g. reject non-personal-auth certs) must check this
+    # field themselves or constrain the ProviderRegistry they pass in.
+    intended_use: IntendedUse | None = None
     cn: str | None = None
     firstname: str | None = None
     lastname: str | None = None
@@ -47,6 +52,7 @@ class CertIdentity:
         return {
             "primary_id": self.primary_id,
             "credential_type": self.credential_type,
+            "intended_use": self.intended_use.name if self.intended_use else None,
             "cn": self.cn,
             "firstname": self.firstname,
             "lastname": self.lastname,
@@ -97,17 +103,16 @@ def parse_identity(
     # Policy OIDs
     identity.policy_oids = get_policy_oids(cert)
 
-    # Match provider by OID, then heuristic fallback
+    # Match provider by OID, then heuristic fallback.  If neither matches,
+    # credential_type is UNKNOWN — never silently pick an arbitrary provider.
     policy_set = set(identity.policy_oids)
     provider = registry.match_oids(policy_set)
     if provider is None:
         provider = registry.match_heuristic(identity.cn, identity.organization, identity.ou)
-    if provider is None:
-        all_providers = registry.all()
-        provider = all_providers[-1] if all_providers else None
 
     if provider:
         identity.credential_type = provider.name
+        identity.intended_use = provider.intended_use
         provider.cn_parser(identity)
     else:
         identity.credential_type = "UNKNOWN"
