@@ -75,6 +75,15 @@ known-first-party = ["pki"]
 
 [tool.ruff.format]
 quote-style = "double"
+# Ruff 0.16 began formatting Python code blocks inside Markdown, which turned a
+# tooling upgrade into a CI failure on unchanged prose. The formatter is
+# authoritative for source, not documentation: reflowing the README examples
+# strips the blank lines separating the commented steps in the full
+# configuration example, making the docs harder to read to satisfy a rule
+# written for source files. Note this leaves Markdown examples unchecked
+# entirely — `ruff check` reports "No Python files found" for .md — so code in
+# the docs is verified by review, not tooling.
+exclude = ["*.md"]
 
 [tool.mypy]
 python_version = "3.11"

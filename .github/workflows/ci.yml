@@ -14,7 +14,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install ruff
+      # Pinned deliberately. Unpinned, a ruff release changes the result of CI
+      # on unchanged code — 0.16 began formatting Python inside Markdown and
+      # broke this job with no commit behind it. Bump this on purpose.
+      - run: pip install ruff==0.16.3
       - run: ruff check .
       - run: ruff format --check .
 
@@ -35,6 +38,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # pip-audit audits the whole environment, including the venv bootstrap.
+      # The runner's stock pip/setuptools carry their own advisories, which
+      # failed this job for vulnerabilities in build tooling that pki-core
+      # neither ships nor imports. Upgrade them rather than suppress the
+      # findings, so the gate keeps reporting real ones.
+      - run: pip install --upgrade pip setuptools
       - run: pip install -e ".[dev]" bandit pip-audit cyclonedx-bom
       - run: bandit -r src/pki/core -c pyproject.toml --severity-level high
       - run: pip-audit
