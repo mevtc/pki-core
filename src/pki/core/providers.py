@@ -29,6 +29,22 @@ class IntendedUse(Flag):
             raise AuthError(...)
 
     New flags may be added without restructuring existing providers.
+
+    ``CARD_AUTH`` is deliberately its own bit rather than a shade of
+    ``PERSONAL_AUTH`` or ``NPE_AUTH``.  A card-authentication credential
+    (PIV / PIV-I Card Authentication, ``id-PIV-cardAuth``) is neither: it
+    is not a device, and it does not authenticate the holder.  Its private
+    key requires no activation data, so — in the words of the DoD ECA CP —
+    validating one "provides only proof of the physical presence of the
+    smart card token.  It provides no proof of the identity of the
+    individual in possession of the token."
+
+    It therefore must never satisfy a ``PERSONAL_AUTH`` check: on a real
+    card the card-authentication and personal-authentication certificates
+    can carry the *same* subject identifier, so treating the former as the
+    latter lets a PIN-less read authenticate as the cardholder.  Folding it
+    into ``NPE_AUTH`` would be no better — it would then satisfy device
+    authentication, which it is equally not approved for.
     """
 
     PERSONAL_AUTH = auto()  # Human signing in or signing as themselves
@@ -36,6 +52,7 @@ class IntendedUse(Flag):
     OBJECT_SIGNING = auto()  # Content / code / document signing at scale
     ENCRYPTION = auto()  # Key transport / encipherment
     TIMESTAMPING = auto()  # Time-stamp authority signing
+    CARD_AUTH = auto()  # Card/token presence only — see below
 
 
 @dataclass(frozen=True)

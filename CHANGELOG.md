@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-08-21
+
+Patch rather than minor: `IntendedUse`'s docstring already states that new
+flags may be added without restructuring existing providers, so this
+exercises the released contract instead of extending it. Nothing behaves
+differently, and the addition fills a taxonomy gap that was forcing
+provider packs into a security boundary error.
+
+### Added
+
+- `IntendedUse.CARD_AUTH` — a distinct capability bit for card /
+  token-presence credentials (PIV and PIV-I Card Authentication, EKU
+  `id-PIV-cardAuth`).
+
+  These were previously indistinguishable from person credentials in
+  consuming provider packs, which is a security boundary error: a
+  card-authentication private key requires no activation data, so
+  validating one proves only that the token is present. The DoD ECA CP
+  states it directly — such a certificate "provides only proof of the
+  physical presence of the smart card token. It provides no proof of the
+  identity of the individual in possession of the token."
+
+  It matters because on a real card the card-authentication and
+  personal-authentication certificates can carry the *same* subject
+  identifier, so classifying the former as `PERSONAL_AUTH` lets a PIN-less
+  read authenticate as the cardholder.
+
+  The bit is deliberately separate rather than folded into `NPE_AUTH`:
+  a card-auth credential is not a device either, and folding would simply
+  move the misclassification to device authentication.
+
+  Additive — no existing provider changes behaviour. Provider packs must
+  opt in by reclassifying their card-auth policy OIDs; see pki-federal.
+
 ## [0.5.0] - 2026-08-11
 
 Note for anyone upgrading from PyPI: 0.4.0 was tagged but never published,

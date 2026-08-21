@@ -139,3 +139,49 @@ class TestIntendedUseConstraint:
         cs_only = self._provider("CS", IntendedUse.OBJECT_SIGNING)
         assert IntendedUse.PERSONAL_AUTH in pe_only.intended_use
         assert IntendedUse.PERSONAL_AUTH not in cs_only.intended_use
+
+
+class TestCardAuthIsolation:
+    """CARD_AUTH must not satisfy person or device authentication.
+
+    A card-authentication key needs no activation data, so validating one
+    proves the token is present and nothing about who holds it.  On a real
+    card it can share a subject identifier with the personal-authentication
+    certificate, so any leak across this boundary lets a PIN-less read
+    authenticate as the cardholder.
+    """
+
+    def _provider(self, name: str, intended_use: IntendedUse) -> AuthProvider:
+        return AuthProvider(
+            name=name,
+            display_name=name,
+            auth_oids=frozenset({"1.2.3"}),
+            cn_parser=_noop_parser,
+            primary_id_selector=_dn_selector,
+            intended_use=intended_use,
+        )
+
+    def test_card_auth_is_a_distinct_bit(self):
+        assert IntendedUse.CARD_AUTH is not IntendedUse.PERSONAL_AUTH
+        assert IntendedUse.CARD_AUTH is not IntendedUse.NPE_AUTH
+
+    def test_card_auth_does_not_satisfy_personal_or_npe(self):
+        card = self._provider("CARD", IntendedUse.CARD_AUTH)
+        assert IntendedUse.PERSONAL_AUTH not in card.intended_use
+        assert IntendedUse.NPE_AUTH not in card.intended_use
+        assert IntendedUse.CARD_AUTH in card.intended_use
+
+    def test_person_provider_does_not_satisfy_card_auth(self):
+        pe = self._provider("PE", IntendedUse.PERSONAL_AUTH)
+        assert IntendedUse.CARD_AUTH not in pe.intended_use
+
+    def test_person_constrained_registry_rejects_card_auth(self):
+        """A person-only registry must refuse a card-auth provider outright."""
+        reg = ProviderRegistry(intended_use=IntendedUse.PERSONAL_AUTH)
+        with pytest.raises(ValueError, match="does not support"):
+            reg.register(self._provider("CARD", IntendedUse.CARD_AUTH))
+
+    def test_npe_constrained_registry_rejects_card_auth(self):
+        reg = ProviderRegistry(intended_use=IntendedUse.NPE_AUTH)
+        with pytest.raises(ValueError, match="does not support"):
+            reg.register(self._provider("CARD", IntendedUse.CARD_AUTH))
