@@ -7,6 +7,7 @@ trust-store source URLs for a single credential ecosystem.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -15,6 +16,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .identity import CertIdentity
+
+logger = logging.getLogger(__name__)
 
 
 class IntendedUse(Flag):
@@ -55,6 +58,26 @@ class IntendedUse(Flag):
     CARD_AUTH = auto()  # Card/token presence only — see below
 
 
+# Resolution order when a certificate's policy OIDs match providers of more
+# than one intended use.  Least-privileged first: PERSONAL_AUTH is the most
+# powerful classification a credential can receive, so it is reachable only
+# when no narrower class also matched.
+#
+# CARD_AUTH leads because a card-authentication key needs no activation data —
+# it proves the token is present and nothing about who holds it — and its OID
+# is definitional for that. NPE_AUTH follows for the same reason: DoD CP v11
+# requires every device certificate to assert an NPE OID, so its presence
+# identifies a device no matter what else is asserted.
+_USE_PRECEDENCE: tuple[IntendedUse, ...] = (
+    IntendedUse.CARD_AUTH,
+    IntendedUse.NPE_AUTH,
+    IntendedUse.OBJECT_SIGNING,
+    IntendedUse.TIMESTAMPING,
+    IntendedUse.ENCRYPTION,
+    IntendedUse.PERSONAL_AUTH,
+)
+
+
 @dataclass(frozen=True)
 class HeuristicRule:
     """A single heuristic for guessing credential type from cert fields."""
@@ -92,14 +115,26 @@ class AuthProvider:
     min_aal: int = 2
     controls: tuple[str, ...] = ()
     intended_use: IntendedUse = IntendedUse.PERSONAL_AUTH
+    # Policy OIDs whose presence disqualifies this provider outright, whatever
+    # else the certificate asserts.  Needed because a certificate may carry
+    # OIDs from two use classes: DoD CP v11 lets a device certificate assert a
+    # person OID alongside its mandatory NPE OID.  Least-privilege precedence
+    # in match_oids() resolves that only when a provider for the narrower class
+    # is registered — in a registry constrained to PERSONAL_AUTH there is none,
+    # so the person provider must be able to rule *itself* out.
+    disqualifying_oids: frozenset[str] = frozenset()
 
 
 @dataclass
 class ProviderRegistry:
     """Ordered collection of active authentication providers.
 
-    Providers are matched in insertion order: the first provider whose
-    auth_oids intersect the certificate's policy OIDs wins.
+    Insertion order determines presentation (``names()``, ``all()``) and
+    breaks ties between providers of the *same* intended use.  It does **not**
+    decide between different use classes: when a certificate's policy OIDs
+    match providers that disagree about ``intended_use``,
+    :meth:`match_oids` resolves by least privilege rather than by
+    registration order.  See that method for why.
 
     A registry may be constrained to a specific IntendedUse at
     construction time.  When constrained, register() refuses any
@@ -152,10 +187,65 @@ class ProviderRegistry:
         return list(self._providers.keys())
 
     def match_oids(self, policy_oids: set[str]) -> AuthProvider | None:
-        """Return the first provider whose auth_oids intersect policy_oids."""
-        for provider in self._providers.values():
-            if policy_oids & provider.auth_oids:
-                return provider
+        """Return the provider matching ``policy_oids``, least-privileged first.
+
+        A certificate may legitimately assert policy OIDs from more than one
+        use class.  DoD CP v11 Section 1.2 is explicit: "All NPE certificates
+        shall assert the appropriate Internal NPE or Medium NPE OID.  Medium
+        NPE certificates **may also assert any Medium Software or Medium
+        Hardware OID** if they meet the corresponding requirements."  So a
+        device certificate can carry a person OID alongside its device OID.
+
+        Returning the first registered match would let dict insertion order
+        decide whether such a certificate is a person or a device — making
+        registration order a security control.  Instead, when the matched
+        providers disagree about ``intended_use``, the least-privileged class
+        wins, per :data:`_USE_PRECEDENCE`.  The NPE or card-auth assertion is
+        definitional: a person credential never carries one.
+
+        When the matched providers disagree in a way the precedence list does
+        not cover, this returns ``None`` rather than guessing — a valid
+        credential rejected is recoverable, a device authenticated as a human
+        is not.
+
+        Args:
+            policy_oids: Certificate policy OIDs from the certificate.
+
+        Returns:
+            The matching provider, or ``None`` if nothing matched or the match
+            was ambiguous.
+        """
+        matches = [
+            p
+            for p in self._providers.values()
+            if policy_oids & p.auth_oids and not (policy_oids & p.disqualifying_oids)
+        ]
+        if not matches:
+            return None
+
+        uses = {p.intended_use for p in matches}
+        if len(uses) == 1:
+            # Unambiguous: every match agrees on the use class, so registration
+            # order is a presentation detail rather than a security decision.
+            return matches[0]
+
+        for use in _USE_PRECEDENCE:
+            for provider in matches:
+                if provider.intended_use is use:
+                    logger.debug(
+                        "Certificate policy OIDs matched %d use classes (%s); "
+                        "resolved to %s by least-privilege precedence",
+                        len(uses),
+                        ", ".join(sorted(u.name or str(u) for u in uses)),
+                        provider.name,
+                    )
+                    return provider
+
+        logger.warning(
+            "Certificate policy OIDs matched providers with conflicting "
+            "intended_use (%s) and no precedence applies; refusing to classify",
+            ", ".join(sorted(str(u) for u in uses)),
+        )
         return None
 
     def match_heuristic(

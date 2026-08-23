@@ -12,7 +12,8 @@ timelines, and disclosure policy, see
 
 | Version | Supported |
 | ------- | --------- |
-| 0.5.x   | Yes       |
+| 0.6.x   | Yes       |
+| 0.5.x   | No        |
 | 0.4.x   | No        |
 | 0.3.x   | No        |
 | 0.2.x   | No        |

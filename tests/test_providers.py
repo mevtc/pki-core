@@ -2,7 +2,13 @@
 
 import pytest
 
-from pki.core.providers import AuthProvider, HeuristicRule, IntendedUse, ProviderRegistry
+from pki.core.providers import (
+    _USE_PRECEDENCE,
+    AuthProvider,
+    HeuristicRule,
+    IntendedUse,
+    ProviderRegistry,
+)
 
 
 def _noop_parser(identity):
@@ -185,3 +191,86 @@ class TestCardAuthIsolation:
         reg = ProviderRegistry(intended_use=IntendedUse.NPE_AUTH)
         with pytest.raises(ValueError, match="does not support"):
             reg.register(self._provider("CARD", IntendedUse.CARD_AUTH))
+
+
+class TestMatchOidsPrecedence:
+    """Resolution across use classes must not depend on registration order.
+
+    DoD CP v11 Section 1.2: "All NPE certificates shall assert the appropriate
+    Internal NPE or Medium NPE OID.  Medium NPE certificates may also assert
+    any Medium Software or Medium Hardware OID if they meet the corresponding
+    requirements."  A device certificate can therefore carry a person OID too,
+    and first-match-wins would let dict insertion order decide whether it
+    authenticates as a device or as a human.
+    """
+
+    def _provider(self, name, oids, use):
+        return AuthProvider(
+            name=name,
+            display_name=name,
+            auth_oids=frozenset(oids),
+            cn_parser=_noop_parser,
+            primary_id_selector=_dn_selector,
+            intended_use=use,
+        )
+
+    def _dual_registry(self, person_first: bool):
+        person = self._provider("PERSON", {"1.1", "shared"}, IntendedUse.PERSONAL_AUTH)
+        device = self._provider("DEVICE", {"2.2", "shared"}, IntendedUse.NPE_AUTH)
+        reg = ProviderRegistry()
+        for p in (person, device) if person_first else (device, person):
+            reg.register(p)
+        return reg
+
+    def test_device_wins_regardless_of_registration_order(self):
+        for person_first in (True, False):
+            reg = self._dual_registry(person_first)
+            matched = reg.match_oids({"1.1", "2.2"})
+            assert matched is not None
+            assert matched.intended_use is IntendedUse.NPE_AUTH, (
+                f"person_first={person_first} resolved to {matched.name}"
+            )
+
+    def test_card_auth_outranks_person(self):
+        reg = ProviderRegistry()
+        reg.register(self._provider("PERSON", {"1.1"}, IntendedUse.PERSONAL_AUTH))
+        reg.register(self._provider("CARD", {"2.2"}, IntendedUse.CARD_AUTH))
+        assert reg.match_oids({"1.1", "2.2"}).intended_use is IntendedUse.CARD_AUTH
+
+    def test_card_auth_outranks_device(self):
+        reg = ProviderRegistry()
+        reg.register(self._provider("DEVICE", {"1.1"}, IntendedUse.NPE_AUTH))
+        reg.register(self._provider("CARD", {"2.2"}, IntendedUse.CARD_AUTH))
+        assert reg.match_oids({"1.1", "2.2"}).intended_use is IntendedUse.CARD_AUTH
+
+    def test_unambiguous_match_still_honours_order(self):
+        """Same use class: first registered wins, as before."""
+        reg = ProviderRegistry()
+        reg.register(self._provider("FIRST", {"1.1"}, IntendedUse.PERSONAL_AUTH))
+        reg.register(self._provider("SECOND", {"1.1"}, IntendedUse.PERSONAL_AUTH))
+        assert reg.match_oids({"1.1"}).name == "FIRST"
+
+    def test_single_class_match_unchanged(self):
+        reg = self._dual_registry(person_first=True)
+        assert reg.match_oids({"1.1"}).name == "PERSON"
+        assert reg.match_oids({"2.2"}).name == "DEVICE"
+
+    def test_no_match_returns_none(self):
+        reg = self._dual_registry(person_first=True)
+        assert reg.match_oids({"9.9"}) is None
+
+    def test_person_is_only_reachable_when_nothing_narrower_matched(self):
+        """PERSONAL_AUTH is last in the precedence list, by design."""
+        assert _USE_PRECEDENCE[-1] is IntendedUse.PERSONAL_AUTH
+        assert _USE_PRECEDENCE[0] is IntendedUse.CARD_AUTH
+
+    def test_unknown_use_combination_fails_closed(self):
+        """A use class outside the precedence list must not silently resolve."""
+        odd = IntendedUse.PERSONAL_AUTH | IntendedUse.NPE_AUTH
+        reg = ProviderRegistry()
+        reg.register(self._provider("COMBO", {"1.1"}, odd))
+        reg.register(self._provider("PERSON", {"2.2"}, IntendedUse.PERSONAL_AUTH))
+        # COMBO's composite flag matches no single precedence entry; PERSON does,
+        # so resolution must land on PERSON rather than the composite.
+        matched = reg.match_oids({"1.1", "2.2"})
+        assert matched is None or matched.intended_use is IntendedUse.PERSONAL_AUTH

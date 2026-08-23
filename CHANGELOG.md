@@ -5,6 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-08-23
+
+### Security
+
+- **A device certificate could authenticate as a person.**
+  `ProviderRegistry.match_oids()` returned the first registered provider whose
+  OIDs intersected the certificate's, so registration order decided whether a
+  credential was classified as a person or a device.
+
+  That is unsafe because a certificate may legitimately assert policy OIDs
+  from more than one use class. DoD CP v11 §1.2: *"All NPE certificates shall
+  assert the appropriate Internal NPE or Medium NPE OID. Medium NPE
+  certificates **may also assert any Medium Software or Medium Hardware OID**
+  if they meet the corresponding requirements."* A device certificate
+  asserting both resolved to the person provider purely because it happened to
+  be registered first.
+
+  Matching now resolves by **least privilege** rather than insertion order:
+  when matched providers disagree about `intended_use`, the narrowest class
+  wins (`CARD_AUTH` → `NPE_AUTH` → `OBJECT_SIGNING` → `TIMESTAMPING` →
+  `ENCRYPTION` → `PERSONAL_AUTH`). `PERSONAL_AUTH` is reachable only when
+  nothing narrower matched. A combination the precedence list does not cover
+  returns `None` rather than guessing.
+
+  Scope: this is a latent defect found by reading CP v11, not an observed
+  exploit — no certificate asserting both was seen in the wild. It is
+  nonetheless the same failure class as the card-authentication issue: a
+  non-person credential accepted as human.
+
+- **Providers can now disqualify themselves** via
+  `AuthProvider.disqualifying_oids`. Least-privilege precedence only helps when
+  a provider for the narrower class is registered; in a registry constrained to
+  `PERSONAL_AUTH` there is none, so the dual-asserting certificate still matched
+  the person provider. A provider now declares OIDs whose presence rules it out
+  entirely, whatever else the certificate asserts. Provider packs opt in — see
+  pki-federal, where the person providers disqualify on the NPE and card-auth
+  sets, so a person-constrained registry fails closed instead of misclassifying.
+
+### Changed
+
+- `match_oids()` may now return `None` where it previously returned a
+  provider, for certificates whose OIDs span multiple use classes. **Test
+  before upgrading**: a deployment relying on the old first-match behaviour
+  will see those certificates rejected rather than misclassified. Certificates
+  asserting a single use class are unaffected, and insertion order still
+  breaks ties within one class.
+
 ## [0.5.1] - 2026-08-21
 
 Patch rather than minor: `IntendedUse`'s docstring already states that new
