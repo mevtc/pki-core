@@ -133,11 +133,16 @@ class TestLoadCaCertsFromPem:
 class TestCheckRevocation:
     """Tests for check_revocation() — the main CRL-based revocation check."""
 
-    def test_no_cdp_skips_check(self, ca_cert):
-        """Cert with no CRL distribution points skips check silently."""
-        config = CRLConfig(cache_dir="/tmp/test-crls")
-        # Should not raise
-        check_revocation(ca_cert, config)
+    def test_no_cdp_is_unknown_in_strict_mode(self, ca_cert, tmp_path):
+        """Regression (ADR 0002): no CRL distribution point used to pass
+        silently -- "not revoked" -- even in strict mode."""
+        config = CRLConfig(cache_dir=str(tmp_path), strict=True)
+        with pytest.raises(CertificateError, match="no CRL distribution point"):
+            check_revocation(ca_cert, config)
+
+    def test_no_cdp_allowed_when_not_strict(self, ca_cert, tmp_path):
+        config = CRLConfig(cache_dir=str(tmp_path), strict=False)
+        check_revocation(ca_cert, config)  # warns, does not raise
 
     def test_revoked_cert_raises(self, cac_cert, ca_cert, test_crl, tmp_path):
         """Certificate whose serial is in the CRL raises CertificateError."""
@@ -200,7 +205,7 @@ class TestCheckRevocation:
         """When CRL fetch fails in strict mode, raises CertificateError."""
         config = CRLConfig(cache_dir=str(tmp_path), strict=True, fetch_timeout=1)
         with (
-            patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")),
+            patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")),
             pytest.raises(CertificateError, match="CRL unavailable"),
         ):
             check_revocation(cac_cert, config)
@@ -208,7 +213,7 @@ class TestCheckRevocation:
     def test_fetch_failure_non_strict_continues(self, cac_cert, tmp_path):
         """When CRL fetch fails in non-strict mode, allows through."""
         config = CRLConfig(cache_dir=str(tmp_path), strict=False, fetch_timeout=1)
-        with patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")):
+        with patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")):
             # Should not raise
             check_revocation(cac_cert, config)
 
@@ -259,7 +264,7 @@ class TestGetCrl:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             crl = get_crl(url, config)
             assert crl is not None
 
@@ -271,7 +276,7 @@ class TestGetCrl:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             crl = get_crl(url, config)
             assert crl is not None
 
@@ -337,25 +342,21 @@ class TestRefreshCrl:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             crl = refresh_crl(url, cache_file, config)
             assert crl is not None
             assert cache_file.exists()
 
-    def test_oversized_crl_raises(self, test_crl_der, tmp_path):
-        """CRL exceeding max_crl_bytes raises ValueError."""
+    def test_size_and_timeout_limits_passed_to_fetch(self, test_crl_der, tmp_path):
+        """max_crl_bytes and fetch_timeout bound the fetch itself."""
         url = "http://example.com/test.crl"
         cache_file = tmp_path / "test.crl"
-        config = CRLConfig(cache_dir=str(tmp_path), max_crl_bytes=10)
+        config = CRLConfig(cache_dir=str(tmp_path), max_crl_bytes=10, fetch_timeout=3)
 
-        mock_resp = MagicMock()
-        mock_resp.content = test_crl_der  # much larger than 10 bytes
-        mock_resp.raise_for_status = MagicMock()
-        with (
-            patch("pki.core.crl.httpx.get", return_value=mock_resp),
-            pytest.raises(ValueError, match="exceeds size limit"),
-        ):
+        with patch("pki.core.crl.fetch_bytes", return_value=test_crl_der) as fetch:
             refresh_crl(url, cache_file, config)
+        assert fetch.call_args.kwargs["max_bytes"] == 10
+        assert fetch.call_args.kwargs["timeout"] == 3
 
     def test_network_failure_raises(self, tmp_path):
         """Network failure during refresh propagates the exception."""
@@ -364,7 +365,7 @@ class TestRefreshCrl:
         config = CRLConfig(cache_dir=str(tmp_path))
 
         with (
-            patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")),
+            patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")),
             pytest.raises(httpx.ConnectError),
         ):
             refresh_crl(url, cache_file, config)
@@ -377,7 +378,7 @@ class TestRefreshCrl:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             crl = refresh_crl(url, cache_file, config=None)
             assert crl is not None
 
@@ -394,7 +395,7 @@ class TestRefreshCrlBackground:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             _refresh_crl_background(url, cache_file, config)
             assert cache_file.exists()
 
@@ -405,7 +406,7 @@ class TestRefreshCrlBackground:
         config = CRLConfig(cache_dir=str(tmp_path))
 
         with (
-            patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")),
+            patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")),
             pytest.raises(CRLRefreshError, match="Background CRL refresh failed"),
         ):
             _refresh_crl_background(url, cache_file, config)
@@ -445,7 +446,7 @@ class TestPrefetchCrls:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             result = prefetch_crls(cac_cert, config)
             assert result[url] == "refreshed"
 
@@ -455,7 +456,7 @@ class TestPrefetchCrls:
         mock_resp = MagicMock()
         mock_resp.content = test_crl_der
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.crl.httpx.get", return_value=mock_resp):
+        with patch("pki.core.crl.fetch_bytes", return_value=mock_resp.content):
             result = prefetch_crls(cac_cert, config)
             url = "http://crl.test.example/test.crl"
             assert result[url] == "refreshed"
@@ -463,7 +464,177 @@ class TestPrefetchCrls:
     def test_fetch_error_recorded(self, cac_cert, tmp_path):
         """Fetch error is recorded in results dict."""
         config = CRLConfig(cache_dir=str(tmp_path), fetch_timeout=1)
-        with patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")):
+        with patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")):
             result = prefetch_crls(cac_cert, config)
             url = "http://crl.test.example/test.crl"
             assert result[url].startswith("error:")
+
+
+def _forged_empty_crl_der(issuer_name, signing_key):
+    """An empty CRL naming *issuer_name* but signed by *signing_key*."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes
+
+    now = datetime.datetime.now(datetime.UTC)
+    return (
+        x509.CertificateRevocationListBuilder()
+        .issuer_name(issuer_name)
+        .last_update(now)
+        .next_update(now + datetime.timedelta(days=1))
+        .sign(signing_key, hashes.SHA256())
+        .public_bytes(Encoding.DER)
+    )
+
+
+class TestFetchedCrlVerification:
+    """A CRL fetched from the network is verified before it is used or cached.
+
+    Regression: get_crl() only called verify_crl() on cache loads, so on a
+    cold cache (or a max_acceptable_age forced refresh) a forged empty CRL
+    served from the plain-HTTP distribution point let a revoked certificate
+    pass, even with issuer_certs supplied and strict=True.
+    """
+
+    def test_forged_crl_rejected_on_cold_cache(self, cac_cert, ca_cert, wrong_ca_key, tmp_path):
+        forged = _forged_empty_crl_der(ca_cert.subject, wrong_ca_key)
+        config = CRLConfig(cache_dir=str(tmp_path), strict=True)
+        with (
+            patch("pki.core.crl.fetch_bytes", return_value=forged),
+            pytest.raises(CertificateError, match="signature verification failed"),
+        ):
+            check_revocation(cac_cert, config, issuer_certs=[ca_cert])
+        assert not list(tmp_path.glob("*.crl")), "forged CRL must not be cached"
+
+    def test_forged_crl_rejected_on_forced_refresh(
+        self, cac_cert, ca_cert, wrong_ca_key, test_crl_der, tmp_path
+    ):
+        config = CRLConfig(
+            cache_dir=str(tmp_path), strict=True, cache_ttl=10, max_acceptable_age=100
+        )
+        url = get_crl_distribution_points(cac_cert)[0]
+        cache_file = tmp_path / f"{hashlib.sha256(url.encode()).hexdigest()[:24]}.crl"
+        cache_file.write_bytes(test_crl_der)
+        old = time.time() - 1000
+        os.utime(cache_file, (old, old))
+
+        forged = _forged_empty_crl_der(ca_cert.subject, wrong_ca_key)
+        with (
+            patch("pki.core.crl.fetch_bytes", return_value=forged),
+            pytest.raises(CertificateError, match="signature verification failed"),
+        ):
+            get_crl(url, config, issuer_certs=[ca_cert])
+        assert cache_file.read_bytes() == test_crl_der, "existing cache must be left intact"
+
+    def test_genuine_crl_still_revokes_on_cold_cache(
+        self, cac_cert, ca_cert, test_crl_der, tmp_path
+    ):
+        config = CRLConfig(cache_dir=str(tmp_path), strict=True)
+        with (
+            patch("pki.core.crl.fetch_bytes", return_value=test_crl_der),
+            pytest.raises(CertificateError, match="revoked"),
+        ):
+            check_revocation(cac_cert, config, issuer_certs=[ca_cert])
+
+    def test_background_refresh_does_not_cache_forged_crl(
+        self, ca_cert, wrong_ca_key, test_crl_der, tmp_path
+    ):
+        cache_file = tmp_path / "bg.crl"
+        cache_file.write_bytes(test_crl_der)
+        config = CRLConfig(cache_dir=str(tmp_path), strict=True)
+        forged = _forged_empty_crl_der(ca_cert.subject, wrong_ca_key)
+        with (
+            patch("pki.core.crl.fetch_bytes", return_value=forged),
+            pytest.raises(CRLRefreshError),
+        ):
+            _refresh_crl_background("http://x/bg.crl", cache_file, config, [ca_cert])
+        assert cache_file.read_bytes() == test_crl_der
+
+    def test_prefetch_verifies_when_issuer_certs_given(
+        self, cac_cert, ca_cert, wrong_ca_key, tmp_path
+    ):
+        forged = _forged_empty_crl_der(ca_cert.subject, wrong_ca_key)
+        config = CRLConfig(cache_dir=str(tmp_path), strict=True)
+        with patch("pki.core.crl.fetch_bytes", return_value=forged):
+            results = prefetch_crls(cac_cert, config, issuer_certs=[ca_cert])
+        assert all(r.startswith("error:") for r in results.values())
+        assert not list(tmp_path.glob("*.crl"))
+
+
+class TestRefreshConcurrency:
+    """Concurrent lookups of one CRL share a single fetch."""
+
+    def test_stale_cache_spawns_one_background_refresh(self, test_crl_der, tmp_path):
+        import threading
+
+        url = "http://example.com/stale.crl"
+        config = CRLConfig(cache_dir=str(tmp_path), cache_ttl=10)
+        cache_file = tmp_path / f"{hashlib.sha256(url.encode()).hexdigest()[:24]}.crl"
+        cache_file.write_bytes(test_crl_der)
+        old = time.time() - 1000
+        os.utime(cache_file, (old, old))
+
+        release = threading.Event()
+        calls = []
+
+        def slow_fetch(*args, **kwargs):
+            calls.append(1)
+            release.wait(5)
+            return test_crl_der
+
+        with patch("pki.core.crl.fetch_bytes", side_effect=slow_fetch):
+            for _ in range(20):
+                get_crl(url, config)
+            release.set()
+            for t in threading.enumerate():
+                if t is not threading.current_thread() and t.daemon:
+                    t.join(5)
+        assert len(calls) == 1
+
+    def test_concurrent_cold_fetches_share_one_download(self, test_crl_der, tmp_path):
+        from concurrent.futures import ThreadPoolExecutor
+
+        url = "http://example.com/cold.crl"
+        config = CRLConfig(cache_dir=str(tmp_path))
+        calls = []
+
+        def slow_fetch(*args, **kwargs):
+            calls.append(1)
+            time.sleep(0.2)
+            return test_crl_der
+
+        with (
+            patch("pki.core.crl.fetch_bytes", side_effect=slow_fetch),
+            ThreadPoolExecutor(max_workers=10) as pool,
+        ):
+            crls = list(pool.map(lambda _: get_crl(url, config), range(10)))
+        assert len(calls) == 1
+        assert all(c is not None for c in crls)
+
+    def test_cache_write_leaves_no_temp_files(self, test_crl_der, tmp_path):
+        cache_file = tmp_path / "w.crl"
+        with patch("pki.core.crl.fetch_bytes", return_value=test_crl_der):
+            refresh_crl("http://x/w.crl", cache_file, CRLConfig(cache_dir=str(tmp_path)))
+        assert [p.name for p in tmp_path.iterdir()] == ["w.crl"]
+        assert (cache_file.stat().st_mode & 0o777) == 0o600
+
+
+class TestBackgroundRefreshStartFailure:
+    def test_lock_released_when_thread_cannot_start(self, test_crl_der, tmp_path):
+        """Regression: the per-URL lock leaked if Thread.start() raised, and
+        every later synchronous fetch of that URL blocked forever."""
+        url = "http://example.com/leak.crl"
+        config = CRLConfig(cache_dir=str(tmp_path), cache_ttl=10)
+        cache_file = tmp_path / f"{hashlib.sha256(url.encode()).hexdigest()[:24]}.crl"
+        cache_file.write_bytes(test_crl_der)
+        old = time.time() - 1000
+        os.utime(cache_file, (old, old))
+
+        with patch("pki.core.crl.threading.Thread.start", side_effect=RuntimeError("no threads")):
+            assert get_crl(url, config) is not None  # stale copy still served
+
+        from pki.core.crl import _refresh_lock
+
+        assert _refresh_lock(cache_file).acquire(timeout=1), "lock leaked"
+        _refresh_lock(cache_file).release()

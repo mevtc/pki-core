@@ -44,18 +44,31 @@ pki-core handles:
   matching the presented certificate.  This is performed by the TLS terminator
   (nginx ``ssl_verify_client``, AWS ALB mutual TLS, or similar).  FIPS 201-3
   Section 6.2.3.1 (PKI-AUTH) steps 3-6 are satisfied by the TLS handshake.
+- **Trust anchors are self-signed roots only.**  ``verify_chain()`` moves
+  any non-self-signed certificate in ``trust_store`` (DoD intermediates,
+  Federal Bridge cross-certificates) to the intermediates pool, so it must
+  chain to a root and its constraints apply.  A provider that declares
+  ``trust_anchor_fingerprints`` additionally rejects chains ending at any
+  other root.
+- **Revocation covers the whole chain** when the chain was validated: every
+  certificate except the root, each CRL verified against the issuer actually
+  found in the chain.
 - **Certificate policy OID constraints during path building** —
   ``cryptography``'s path validator does not support the ``initial-policy-set``
   / ``policy-mapping`` inputs from RFC 5280 §6.1.1.  Applications should check
   policy OIDs after validation using ``get_policy_oids()`` and match against
   the expected set (e.g., ``id-fpki-common-authentication`` per FIPS 201-3
-  Section 6.2.3.1 footnote 39).
+  Section 6.2.3.1 footnote 39).  For the same reason the ``policyConstraints``
+  and ``inhibitAnyPolicy`` extensions that Federal Bridge cross-certificates
+  mark critical are *accepted but not processed*.
 - **Certificate Transparency** — SCT verification is not performed.
 """
 
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import itertools
 import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -71,7 +84,13 @@ from cryptography.x509.verification import (
 )
 
 from .algorithms import AlgorithmPolicy, check_algorithms
-from .certificate import CertificateError, is_expired, is_not_yet_valid
+from .certificate import (
+    CertificateError,
+    cert_fingerprint,
+    is_expired,
+    is_not_yet_valid,
+    is_self_signed,
+)
 from .identity import CertIdentity, parse_identity
 from .providers import ProviderRegistry
 from .revocation import (
@@ -191,6 +210,41 @@ def _build_ee_extension_policy(
     return base.may_be_present(x509.ExtendedKeyUsage, Criticality.AGNOSTIC, _validate_eku)
 
 
+def _build_ca_extension_policy() -> ExtensionPolicy:
+    """CA extension policy that admits Federal Bridge cross-certificates.
+
+    ``webpki_defaults_ca()`` rejects any CA certificate carrying a critical
+    extension it does not process.  FPKI cross-certificates mark
+    ``policyConstraints`` and ``inhibitAnyPolicy`` critical, so without this
+    every bridged path fails with "unaccounted-for critical extensions".
+    ``cryptography`` implements no RFC 5280 policy processing, so these are
+    accepted without being enforced -- the documented limitation, not a new
+    one.  ``nameConstraints`` remains enforced.  ``policyMappings`` needs no
+    entry: ``cryptography`` has no type for it and FPKI marks it non-critical.
+    """
+    return (
+        ExtensionPolicy.webpki_defaults_ca()
+        .may_be_present(x509.PolicyConstraints, Criticality.AGNOSTIC, None)
+        .may_be_present(x509.InhibitAnyPolicy, Criticality.AGNOSTIC, None)
+    )
+
+
+def split_trust_anchors(
+    certs: list[x509.Certificate],
+) -> tuple[list[x509.Certificate], list[x509.Certificate]]:
+    """Split CA certificates into ``(roots, intermediates)``.
+
+    Only self-signed roots are trust anchors.  Everything else -- issuing
+    CAs, bridge cross-certificates -- is an intermediate and must itself chain
+    to a root.
+    """
+    roots: list[x509.Certificate] = []
+    intermediates: list[x509.Certificate] = []
+    for cert in certs:
+        (roots if is_self_signed(cert) else intermediates).append(cert)
+    return roots, intermediates
+
+
 def verify_chain(
     cert: x509.Certificate,
     trust_store: list[x509.Certificate],
@@ -205,7 +259,9 @@ def verify_chain(
 
     Args:
         cert: The leaf (end-entity) certificate to verify.
-        trust_store: Trusted root CA certificates.
+        trust_store: Trusted CA certificates.  Only self-signed roots are
+            used as anchors; any other certificate here is treated as an
+            intermediate (see :func:`split_trust_anchors`).
         intermediates: Intermediate CA certificates (may be empty when the
             leaf is issued directly by a root).
         expected_eku: Extended Key Usage OID the end-entity certificate must
@@ -232,21 +288,22 @@ def verify_chain(
         validation.  See the module docstring for the full validation
         boundary.
     """
-    if not trust_store:
-        raise CertificateError("trust_store is empty; cannot verify chain")
+    roots, demoted = split_trust_anchors(trust_store)
+    if not roots:
+        raise CertificateError("trust_store contains no self-signed root; cannot verify chain")
 
-    store = Store(trust_store)
+    store = Store(roots)
     verifier = (
         PolicyBuilder()
         .store(store)
         .extension_policies(
-            ca_policy=ExtensionPolicy.webpki_defaults_ca(),
+            ca_policy=_build_ca_extension_policy(),
             ee_policy=_build_ee_extension_policy(expected_eku),
         )
         .build_client_verifier()
     )
     try:
-        result = verifier.verify(cert, intermediates or [])
+        result = verifier.verify(cert, [*demoted, *(intermediates or [])])
         return list(result.chain)
     except VerificationError as e:
         raise CertificateError(f"Chain validation failed: {e}") from e
@@ -313,11 +370,18 @@ def validate_certificate(
 
     # Step 1: Parse identity
     try:
-        result.identity = parse_identity(cert, registry=policy.registry)
+        result.identity = parse_identity(cert, registry=policy.registry, chain=result.chain)
     except Exception as e:
         logger.error("Identity extraction failed: %s", e)
         result.status = ValidationStatus.ERROR
         result.error = f"Identity extraction failed: {e}"
+        return result
+
+    # Step 1b: The chain must end at a root authoritative for the provider
+    anchor_error = _check_provider_anchor(result.identity, policy.registry, result.chain)
+    if anchor_error:
+        result.status = ValidationStatus.CHAIN_UNTRUSTED
+        result.error = anchor_error
         return result
 
     # Step 2: Check validity period
@@ -331,16 +395,66 @@ def validate_certificate(
             result.error = "Certificate has expired"
             return result
 
-    # Step 3: Check revocation
+    # Step 3: Check revocation -- the leaf alone, or every non-root
+    # certificate in a validated chain, each against its actual issuer.
     if policy.revocation is not None:
-        rev_result, rev_detail = run_revocation_checks(policy.revocation, cert)
-        if rev_result == RevocationResult.REVOKED:
-            result.status = ValidationStatus.REVOKED
-            result.error = rev_detail
-            return result
-        if rev_result == RevocationResult.UNAVAILABLE:
-            result.status = ValidationStatus.ERROR
+        for subject, rev_policy, target in _revocation_targets(
+            policy.revocation, cert, result.chain
+        ):
+            rev_result, rev_detail = run_revocation_checks(rev_policy, target)
+            if rev_result == RevocationResult.GOOD:
+                continue
+            if target is not cert:
+                rev_detail = f"Chain certificate {subject}: {rev_detail}"
+            result.status = (
+                ValidationStatus.REVOKED
+                if rev_result == RevocationResult.REVOKED
+                else ValidationStatus.ERROR
+            )
             result.error = rev_detail
             return result
 
     return result
+
+
+def _check_provider_anchor(
+    identity: CertIdentity,
+    registry: ProviderRegistry | None,
+    chain: list[x509.Certificate] | None,
+) -> str | None:
+    """Return an error if the chain's root is not pinned by the matched provider."""
+    if not chain or registry is None or identity.credential_type is None:
+        return None
+    provider = registry.get(identity.credential_type)
+    if provider is None or not provider.trust_anchor_fingerprints:
+        return None
+    if cert_fingerprint(chain[-1]) in provider.trust_anchor_fingerprints:
+        return None
+    return (
+        f"Chain ends at {chain[-1].subject.rfc4514_string()}, which is not a trust "
+        f"anchor for provider {provider.name!r}"
+    )
+
+
+def _revocation_targets(
+    revocation: RevocationPolicy,
+    cert: x509.Certificate,
+    chain: list[x509.Certificate] | None,
+) -> list[tuple[str, RevocationPolicy, x509.Certificate]]:
+    """Certificates to revocation-check, each with the policy to check it under.
+
+    Without a validated chain only the leaf is checked, under the caller's
+    policy.  With one, every certificate but the root is checked, and its
+    CRL/OCSP response is verified against the issuer the chain actually
+    contains -- never against an unrelated CA with a matching name.
+    """
+    if not chain:
+        return [(cert.subject.rfc4514_string(), revocation, cert)]
+    return [
+        (
+            target.subject.rfc4514_string(),
+            dataclasses.replace(revocation, issuer_certs=[issuer]),
+            target,
+        )
+        for target, issuer in itertools.pairwise(chain)
+    ]

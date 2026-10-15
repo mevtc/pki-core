@@ -270,7 +270,7 @@ class TestCRLCheckUnavailable:
             issuer_certs=None,
             crl_config=CRLConfig(cache_dir=str(tmp_path), strict=True),
         )
-        with patch("pki.core.crl.httpx.get", side_effect=httpx.ConnectError("refused")):
+        with patch("pki.core.crl.fetch_bytes", side_effect=httpx.ConnectError("refused")):
             result, _detail = CRL.check(cac_cert, pol)
             # CRL raises CertificateError("Could not verify..."), which has no "revoked"
             # so it falls to UNAVAILABLE
@@ -361,7 +361,7 @@ class TestQueryOcsp:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch("pki.core.revocation.ocsp.load_der_ocsp_response", return_value=mock_ocsp_resp),
             patch("pki.core.revocation._verify_ocsp_response_signature"),
         ):
@@ -384,7 +384,7 @@ class TestQueryOcsp:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch("pki.core.revocation.ocsp.load_der_ocsp_response", return_value=mock_ocsp_resp),
             patch("pki.core.revocation._verify_ocsp_response_signature"),
         ):
@@ -406,7 +406,7 @@ class TestQueryOcsp:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch("pki.core.revocation.ocsp.load_der_ocsp_response", return_value=mock_ocsp_resp),
             patch("pki.core.revocation._verify_ocsp_response_signature"),
         ):
@@ -420,7 +420,7 @@ class TestQueryOcsp:
 
         cert = _make_cert_with_aia(ca_key, ca_cert, "http://ocsp.example.com")
 
-        with patch("pki.core.revocation.httpx.post", side_effect=httpx.ConnectError("refused")):
+        with patch("pki.core.revocation.fetch_bytes", side_effect=httpx.ConnectError("refused")):
             result, detail = _query_ocsp(cert, ca_cert, "http://ocsp.example.com", timeout=10)
             assert result == RevocationResult.UNAVAILABLE
             assert "failed" in detail.lower()
@@ -434,7 +434,7 @@ class TestQueryOcsp:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch(
                 "pki.core.revocation.ocsp.load_der_ocsp_response",
                 side_effect=ValueError("bad data"),
@@ -458,7 +458,7 @@ class TestQueryOcsp:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch("pki.core.revocation.ocsp.load_der_ocsp_response", return_value=mock_ocsp_resp),
         ):
             result, detail = _query_ocsp(cert, ca_cert, "http://ocsp.example.com", timeout=10)
@@ -494,7 +494,7 @@ class TestOCSPCheckWithAIA:
 
         cert = _make_cert_with_aia(ca_key, ca_cert, "http://ocsp.example.com")
         pol = RevocationPolicy(issuer_certs=[ca_cert])
-        with patch("pki.core.revocation.httpx.post", side_effect=httpx.ConnectError("refused")):
+        with patch("pki.core.revocation.fetch_bytes", side_effect=httpx.ConnectError("refused")):
             result, detail = OCSP.check(cert, pol)
             assert result == RevocationResult.UNAVAILABLE
             assert "unavailable" in detail.lower()
@@ -745,7 +745,7 @@ class TestQueryOcspSignatureVerification:
         mock_http_resp.raise_for_status = MagicMock()
 
         with (
-            patch("pki.core.revocation.httpx.post", return_value=mock_http_resp),
+            patch("pki.core.revocation.fetch_bytes", return_value=mock_http_resp.content),
             patch("pki.core.revocation.ocsp.load_der_ocsp_response", return_value=mock_ocsp_resp),
             patch(
                 "pki.core.revocation._verify_ocsp_response_signature",
@@ -755,3 +755,92 @@ class TestQueryOcspSignatureVerification:
             result, detail = _query_ocsp(cert, ca_cert, "http://ocsp.example.com", timeout=10)
             assert result == RevocationResult.UNAVAILABLE
             assert "signature invalid" in detail.lower()
+
+
+class TestRevocationClassifiedByType:
+    """Regression: REVOKED was inferred from '"revoked" in message', and a
+    verification-failure message embeds the attacker-chosen CRL issuer DN."""
+
+    def test_issuer_dn_containing_revoked_is_unavailable(self, cac_cert, tmp_path):
+        import datetime
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives.serialization import Encoding
+        from cryptography.x509.oid import NameOID
+
+        from pki.core.crl import CRLConfig
+        from pki.core.revocation import CRL, OCSP, RevocationPolicy, RevocationResult
+
+        now = datetime.datetime.now(datetime.UTC)
+        crl = (
+            x509.CertificateRevocationListBuilder()
+            .issuer_name(
+                x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "CA for revoked-card holders")])
+            )
+            .last_update(now)
+            .next_update(now + datetime.timedelta(days=1))
+            .sign(ec.generate_private_key(ec.SECP256R1()), hashes.SHA256())
+            .public_bytes(Encoding.DER)
+        )
+        policy = RevocationPolicy(
+            checks=(CRL, OCSP),
+            issuer_certs=[],
+            crl_config=CRLConfig(cache_dir=str(tmp_path)),
+        )
+        with patch("pki.core.crl.fetch_bytes", return_value=crl):
+            result, detail = CRL.check(cac_cert, policy)
+        assert "revoked-card holders" in detail
+        assert result == RevocationResult.UNAVAILABLE
+
+
+class TestNoDistributionPoint:
+    """ADR 0002: a certificate with no CRL distribution point is UNKNOWN."""
+
+    def test_crl_check_reports_unavailable(self, ca_cert, tmp_path):
+        from pki.core.crl import CRLConfig
+        from pki.core.revocation import CRL, RevocationPolicy, RevocationResult
+
+        policy = RevocationPolicy(crl_config=CRLConfig(cache_dir=str(tmp_path)))
+        result, detail = CRL.check(ca_cert, policy)
+        assert result == RevocationResult.UNAVAILABLE
+        assert "No CRL distribution point" in detail
+
+    def test_strict_pipeline_fails_closed(self, ca_cert, tmp_path):
+        from pki.core.crl import CRLConfig
+        from pki.core.revocation import RevocationPolicy, RevocationResult, run_revocation_checks
+
+        policy = RevocationPolicy(crl_config=CRLConfig(cache_dir=str(tmp_path)), strict=True)
+        result, _ = run_revocation_checks(policy, ca_cert)
+        assert result == RevocationResult.UNAVAILABLE
+
+    def test_non_strict_pipeline_allows(self, ca_cert, tmp_path):
+        from pki.core.crl import CRLConfig
+        from pki.core.revocation import RevocationPolicy, RevocationResult, run_revocation_checks
+
+        policy = RevocationPolicy(crl_config=CRLConfig(cache_dir=str(tmp_path)), strict=False)
+        result, _ = run_revocation_checks(policy, ca_cert)
+        assert result == RevocationResult.GOOD
+
+    def test_falls_through_to_next_strategy(self, ca_cert, tmp_path):
+        from pki.core.crl import CRLConfig
+        from pki.core.revocation import (
+            CRL,
+            RevocationCheck,
+            RevocationPolicy,
+            RevocationResult,
+            run_revocation_checks,
+        )
+
+        class AlwaysGood(RevocationCheck):
+            def check(self, cert, policy):
+                return RevocationResult.GOOD, "fallback consulted"
+
+        policy = RevocationPolicy(
+            checks=(CRL, AlwaysGood()), crl_config=CRLConfig(cache_dir=str(tmp_path))
+        )
+        assert run_revocation_checks(policy, ca_cert) == (
+            RevocationResult.GOOD,
+            "fallback consulted",
+        )

@@ -12,7 +12,8 @@ timelines, and disclosure policy, see
 
 | Version | Supported |
 | ------- | --------- |
-| 0.6.x   | Yes       |
+| 0.7.x   | Yes       |
+| 0.6.x   | No        |
 | 0.5.x   | No        |
 | 0.4.x   | No        |
 | 0.3.x   | No        |
@@ -33,17 +34,28 @@ or independently verify the following:
 
 - **Chain validation is opt-in.** `CertificatePolicy` defaults to
   `check_chain=False`. Without `check_chain=True` and a trust anchor,
-  `validate_certificate()` performs no trust-path enforcement at all.
+  `validate_certificate()` performs no trust-path enforcement at all. It is
+  also what gives identities their full scope: only with a validated chain
+  are provider root pins enforced, every chain certificate revocation-checked
+  against its actual issuer, and bridged issuers separated into their own
+  `primary_id` namespace.
 
-- **CRL signature verification is opt-in.** `RevocationPolicy` defaults to
+- **Key accounts on `primary_id`, which is scoped.** It always carries the
+  provider (`CAC:edipi:...`) and, for a chain through a bridge CA, the
+  cross-certified issuer. Never key accounts on `edipi`, `piv_uuid`, `fascn`
+  or `email` alone: those are meaningful only within the issuing authority.
+
+- **CRL signature verification is opt-in without chain validation.**
+  With `check_chain=True` every CRL is verified against the issuer in the
+  validated chain. Otherwise `RevocationPolicy` defaults to
   `issuer_certs=None`, which skips CRL signature verification entirely.
   Pass `issuer_certs` explicitly to have fetched CRLs authenticated against
   known CA certificates before being trusted.
 
-- **A missing CRL distribution point is treated as "not revoked," not
-  "unknown."** A certificate with no CRL DP currently reports revocation
-  status as GOOD rather than UNAVAILABLE. This also means `strict=True`
-  fail-closed behavior is never reached for such certificates.
+- **A missing CRL distribution point means "unknown."** Such a certificate
+  is UNAVAILABLE, never GOOD: the next strategy (e.g. OCSP) is tried, and
+  `strict=True` (the default) then fails closed. Pass `strict=False` only if
+  you accept unchecked certificates. See `docs/adr/0002`.
 
 - **OCSP responses have no freshness or replay protection.** Responses are
   not checked against `this_update`/`next_update`, and requests do not

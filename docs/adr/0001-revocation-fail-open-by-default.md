@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. Item 2 (no CRL distribution point reported GOOD) superseded by
+ADR 0002 on 2026-10-14.
 
 ## Context
 

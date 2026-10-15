@@ -36,7 +36,7 @@ class TestVerifyChain:
 
     def test_empty_store(self, chain_leaf_cert):
         """Empty trust store — should fail."""
-        with pytest.raises(CertificateError, match="trust_store is empty"):
+        with pytest.raises(CertificateError, match="no self-signed root"):
             verify_chain(chain_leaf_cert, [])
 
     def test_expired_leaf(self, chain_ca_cert, chain_expired_leaf):

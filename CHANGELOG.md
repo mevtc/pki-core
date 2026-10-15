@@ -5,6 +5,138 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.7.0] - 2026-10-15
+
+### Security
+
+- **A subject heuristic could re-admit a certificate the policy OIDs ruled
+  out.** 0.6.0 let providers disqualify themselves (`disqualifying_oids`), but
+  `parse_identity()` fell back to CN/organization heuristics whenever
+  `match_oids()` returned `None` -- and `None` meant *no match*,
+  *disqualified* and *ambiguous* alike. A device certificate that also
+  asserted a person OID was correctly disqualified, then classified as a
+  person anyway if its subject tripped a heuristic. New
+  `ProviderRegistry.resolve()` returns a `ProviderMatch` with an explicit
+  `MatchOutcome` (`MATCHED`, `NO_MATCH`, `DISQUALIFIED`, `AMBIGUOUS`);
+  `parse_identity()` falls back to heuristics only on `NO_MATCH`, and
+  `match_heuristic()` takes the certificate's policy OIDs and skips any
+  provider they disqualify. Heuristics may narrow a classification, never
+  widen it. **Behavioural change:** such certificates now parse as
+  `UNKNOWN`. `match_oids()` is unchanged.
+
+- **A freshly fetched CRL was never signature-verified.** `get_crl()` called
+  `verify_crl()` only when loading from cache. On a cold cache, and on the
+  forced refresh once a cached CRL exceeds `max_acceptable_age` (18 hours under
+  pki-federal's defaults), the downloaded CRL was used without verification —
+  even with `issuer_certs` supplied and `strict=True`. DoD CRL distribution
+  points are plain HTTP, so an on-path attacker serving an empty CRL signed by
+  any key could make a revoked certificate validate as GOOD. The forged CRL was
+  also written to the cache, so subsequent verified loads failed closed and
+  denied service until the next refresh.
+
+  `refresh_crl()` now verifies the CRL against `issuer_certs` **before**
+  caching it, covering the synchronous, forced and background paths. A CRL
+  that fails verification is never cached and leaves the existing cache
+  intact. `refresh_crl()` and `prefetch_crls()` take a new optional
+  `issuer_certs` argument; pass it to `prefetch_crls()` so cron-warmed caches
+  are verified too.
+
+- **Download size limits did not bound memory.** `max_crl_bytes` and the trust
+  store's 50 MB cap were checked only after httpx had buffered the entire body
+  — after transparently decompressing any `Content-Encoding` — so a small
+  gzip response could expand to gigabytes first. OCSP responses had no limit at
+  all, and the fetch timeout bounded only the gap between reads, so a server
+  trickling bytes could hold a request open indefinitely. All fetches now go
+  through `pki.core._http.fetch_bytes()`, which streams the raw body and stops
+  at the limit, requests and requires `identity` encoding, and enforces the
+  timeout as a deadline for the whole transfer. OCSP responses are capped at
+  1 MB (`revocation.MAX_OCSP_RESPONSE_BYTES`). Each PKCS#7 member of the
+  trust-store ZIP is now also capped at its decompressed size.
+
+- **Stale CRLs triggered unbounded concurrent refreshes.** Every request served
+  from a stale cache started its own background download, and all of them
+  wrote through the same `.tmp` file with `O_TRUNC`, so overlapping writes
+  could rename a corrupted CRL into the cache and fail strict lookups. Fetches
+  are now serialised per URL: one background refresh at a time, concurrent
+  cold-cache callers share a single download, and each cache write uses a
+  unique temporary file. If the background thread cannot be started the lock
+  is released and the stale copy served, rather than leaving every later
+  fetch of that URL blocked forever.
+
+- **A CRL issuer name could make a certificate read as revoked.** `CRLCheck`
+  decided REVOKED by searching the error message for "revoked", and
+  verification-failure messages embed the CRL issuer DN, which an on-path
+  attacker chooses. A forged CRL from an issuer named e.g. "CA for
+  revoked-card holders" turned an unrevoked certificate into REVOKED —
+  locking out its holder and short-circuiting any OCSP fallback. Revocation
+  is now signalled by a dedicated `CertificateRevokedError`; every other
+  `CertificateError` is UNAVAILABLE.
+
+- **Any trusted CA could mint another credential family's identifier.**
+  `primary_id` was a bare `edipi:` / `uuid:` / `dn:` value shared by every
+  provider and every CA, and a flat CA bundle made every certificate in it --
+  intermediates and Federal Bridge cross-certificates included -- a trust
+  anchor. Any CA reachable that way could issue a certificate landing on
+  another person's `primary_id`; UUIDs and EDIPIs are not secret.
+
+  - **Trust anchors are self-signed roots only.** `verify_chain()` moves every
+    other certificate in `trust_store` into the intermediates pool, so it must
+    chain to a root and its name constraints apply. New
+    `split_trust_anchors()` exposes the split.
+  - **Providers pin their roots.** `AuthProvider.trust_anchor_fingerprints`
+    (SHA-256 of the DER root); with `check_chain=True`, a chain ending at any
+    other root is `CHAIN_UNTRUSTED` for that provider.
+  - **`primary_id` is scoped.** `<provider>:<identifier>`, e.g.
+    `CAC:edipi:1234567890`. When the validated chain crosses one of the
+    provider's `bridge_ca_subjects`, the cross-certified root below the bridge
+    is part of the scope -- `PIV[CN=...]:uuid:...` -- so each bridged issuer is
+    its own namespace. Root rollover does not change an ID. With no provider
+    match the ID is `dn:<issuer>;<subject>`, since RFC 5280 makes a subject
+    name unique only per issuer; the selectors' DN fallback is the same
+    (`selectors.scoped_dn()`).
+  - `CertIdentity` gains `trust_anchor` (root fingerprint) and `trust_domain`.
+    `parse_identity()` takes the validated `chain`; `validate_certificate()`
+    passes it.
+
+- **Only the leaf was revocation-checked, against any CA with a matching
+  name.** With a validated chain, `validate_certificate()` now checks every
+  certificate except the root, and verifies each CRL / OCSP response against
+  the issuer actually in the chain rather than any `issuer_certs` entry whose
+  subject matches. This closes "CRL is not bound to the certificate's actual
+  issuer" whenever `check_chain=True`, and verifies CRL signatures even when
+  the caller passed no `issuer_certs`.
+
+- **A certificate with no CRL distribution point passed revocation checking.**
+  It was reported GOOD, which ended the pipeline before `strict` was ever
+  consulted, so even strict callers accepted it unchecked. It is now
+  UNAVAILABLE: other strategies are tried, and `strict=True` (the default)
+  fails closed. `check_revocation()` likewise raises in strict mode. ADR 0002
+  supersedes item 2 of ADR 0001.
+
+### Changed
+
+- **Breaking: `primary_id` format.** Every value now carries a provider prefix
+  (`CAC:`, `PIV:`, ...), and DN-based IDs include the issuer. Identifiers
+  stored by earlier versions must be migrated.
+- **Breaking: certificates need a revocation source in strict mode.** A
+  certificate (leaf or intermediate) with no CRL distribution point fails
+  strict validation unless another strategy, such as OCSP, answers. Add
+  distribution points to private/test PKIs, or set `strict=False`.
+- **Breaking: chain validation needs a self-signed root.** A `trust_store`
+  holding only intermediates or cross-certificates now fails with
+  "no self-signed root". Applications that deliberately anchored on an
+  intermediate must supply its root instead.
+- **Revocation checks every non-root certificate in a validated chain.** In
+  strict mode an unreachable intermediate CRL now fails validation.
+- CA certificates may carry critical `policyConstraints` and
+  `inhibitAnyPolicy`, which Federal Bridge cross-certificates require. They are
+  accepted but not processed -- the existing RFC 5280 policy-processing
+  limitation.
+- CRL, OCSP and trust-store fetches send `Accept-Encoding: identity` and reject
+  a response that arrives with any other `Content-Encoding`.
+
 ## [0.6.0] - 2026-08-23
 
 ### Security

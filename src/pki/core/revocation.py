@@ -32,17 +32,20 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-import httpx
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.x509 import ocsp
 from cryptography.x509.oid import AuthorityInformationAccessOID, ExtensionOID
 
+from ._http import fetch_bytes
 from .certificate import CertificateError
-from .crl import CRLConfig
+from .crl import CertificateRevokedError, CRLConfig, get_crl_distribution_points
 from .crl import check_revocation as _crl_check_revocation
 
 logger = logging.getLogger(__name__)
+
+# OCSP responses are a few KB even with an embedded responder certificate.
+MAX_OCSP_RESPONSE_BYTES = 1024 * 1024
 
 
 class RevocationResult(StrEnum):
@@ -93,17 +96,30 @@ class CRLCheck(RevocationCheck):
         cert: x509.Certificate,
         policy: RevocationPolicy,
     ) -> tuple[RevocationResult, str]:
-        """Perform a CRL-based revocation check against distribution points."""
+        """Perform a CRL-based revocation check against distribution points.
+
+        A certificate with no CRL distribution point is UNAVAILABLE -- status
+        unknown -- so the next strategy (e.g. OCSP) is tried and
+        ``RevocationPolicy.strict`` alone decides the outcome (ADR 0002).  It
+        used to be reported GOOD, which short-circuited the pipeline before
+        strictness was ever consulted.
+        """
+        if not get_crl_distribution_points(cert):
+            return (
+                RevocationResult.UNAVAILABLE,
+                "No CRL distribution point; revocation status unknown",
+            )
         try:
             _crl_check_revocation(cert, policy.crl_config, issuer_certs=policy.issuer_certs)
             return RevocationResult.GOOD, "CRL check passed"
+        except CertificateRevokedError as e:
+            return RevocationResult.REVOKED, str(e)
         except CertificateError as e:
-            msg = str(e)
-            if "revoked" in msg.lower():
-                return RevocationResult.REVOKED, msg
-            # CRL unavailable or verification failure — let next strategy try
-            logger.debug("CRL check unavailable: %s", msg)
-            return RevocationResult.UNAVAILABLE, msg
+            # CRL unavailable or verification failure — let next strategy try.
+            # Classified by type, never by message: the message can carry an
+            # attacker-chosen CRL issuer DN containing the word "revoked".
+            logger.debug("CRL check unavailable: %s", e)
+            return RevocationResult.UNAVAILABLE, str(e)
 
     def __repr__(self) -> str:
         """Return string representation of the CRL check strategy."""
@@ -285,19 +301,21 @@ def _query_ocsp(
         return RevocationResult.UNAVAILABLE, f"Failed to build OCSP request: {e}"
 
     try:
-        resp = httpx.post(
+        resp_data = fetch_bytes(
             url,
+            method="POST",
             content=request_data,
             headers={"Content-Type": "application/ocsp-request"},
+            max_bytes=MAX_OCSP_RESPONSE_BYTES,
             timeout=timeout,
+            follow_redirects=False,
         )
-        resp.raise_for_status()
     except Exception as e:
         logger.debug("OCSP request to %s failed: %s", url, e)
         return RevocationResult.UNAVAILABLE, f"OCSP request failed ({url}): {e}"
 
     try:
-        ocsp_response = ocsp.load_der_ocsp_response(resp.content)
+        ocsp_response = ocsp.load_der_ocsp_response(resp_data)
     except Exception as e:
         return RevocationResult.UNAVAILABLE, f"Failed to parse OCSP response from {url}: {e}"
 

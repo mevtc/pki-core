@@ -1,18 +1,22 @@
 """CRL fetching and revocation checking with stale-while-revalidate caching."""
 
+from __future__ import annotations
+
+import contextlib
 import hashlib
 import logging
 import os
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-import httpx
 from cryptography import x509
 from platformdirs import user_cache_dir
 
+from ._http import fetch_bytes
 from .certificate import CertificateError
 
 logger = logging.getLogger(__name__)
@@ -20,6 +24,16 @@ logger = logging.getLogger(__name__)
 
 class CRLRefreshError(CertificateError):
     """Raised when a background CRL refresh fails."""
+
+
+class CertificateRevokedError(CertificateError):
+    """Raised when a CRL lists the certificate as revoked.
+
+    The only signal that means *revoked*.  Every other ``CertificateError``
+    from this module means revocation status could not be established; a
+    caller must never infer revocation from message text, which embeds
+    attacker-influenced data such as the CRL issuer DN.
+    """
 
 
 @dataclass
@@ -170,10 +184,16 @@ def check_revocation(
     """
     urls = get_crl_distribution_points(cert)
     if not urls:
-        logger.warning(
-            "Certificate serial=%s has no CRL distribution points; skipping revocation check",
-            format(cert.serial_number, "x"),
+        # No CRL distribution point means revocation status is *unknown*, not
+        # "not revoked" (ADR 0002).  Strict callers fail closed; non-strict
+        # callers proceed with a warning, as with an unreachable CRL.
+        msg = (
+            f"Certificate serial={format(cert.serial_number, 'x')} has no CRL "
+            "distribution point; revocation status unknown"
         )
+        if config.strict:
+            raise CertificateError(msg)
+        logger.warning("%s -- strict=false, allowing", msg)
         return
 
     for url in urls:
@@ -189,7 +209,7 @@ def check_revocation(
             continue
 
         if crl.get_revoked_certificate_by_serial_number(cert.serial_number) is not None:
-            raise CertificateError(
+            raise CertificateRevokedError(
                 f"Certificate has been revoked (serial {format(cert.serial_number, 'x')})"
             )
 
@@ -207,31 +227,28 @@ def get_crl(
       3. No cache     -> fetch synchronously, cache result, return.
 
     If *issuer_certs* is provided, the CRL signature and freshness are
-    verified on every load — including from cache.  This prevents a local
-    attacker with write access to the cache directory from substituting a
-    forged CRL.  Without *issuer_certs*, signature verification is skipped
-    (backward compatible).
+    verified on every load — from the network and from cache alike.  A
+    fetched CRL is verified before it is written to the cache, so neither a
+    network attacker nor a local attacker with write access to the cache
+    directory can substitute a forged CRL.  Without *issuer_certs*, signature
+    verification is skipped (backward compatible).
+
+    At most one fetch per URL runs at a time.  Concurrent callers needing a
+    synchronous fetch wait for the one in flight and reuse its result; a
+    stale-cache background refresh is skipped while another is running.
     """
     cache_dir = Path(config.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     url_hash = hashlib.sha256(url.encode()).hexdigest()[:24]
     cache_file = cache_dir / f"{url_hash}.crl"
+    lock = _refresh_lock(cache_file)
 
-    try:
-        st = cache_file.stat()
-        age = time.time() - st.st_mtime
-        data = cache_file.read_bytes()
-    except FileNotFoundError:
-        data = None
-        age = float("inf")
+    data, age = _read_cache(cache_file)
 
     if data is not None:
         if age < config.cache_ttl:
-            crl = parse_crl_bytes(data)
-            if issuer_certs is not None:
-                verify_crl(crl, issuer_certs, strict=config.strict)
-            return crl
+            return _load_verified(data, issuer_certs, config)
 
         # Cache is stale — check if it's too old to serve even as a fallback
         if config.max_acceptable_age and age > config.max_acceptable_age:
@@ -241,74 +258,162 @@ def get_crl(
                 age,
                 config.max_acceptable_age,
             )
-            return refresh_crl(url, cache_file, config)
+            return _refresh_once(url, cache_file, config, issuer_certs, lock)
 
-        logger.debug(
-            "CRL stale (%.0fs old) for %s -- serving cache, refreshing in background",
-            age,
-            url,
-        )
-        threading.Thread(
-            target=_refresh_crl_background,
-            args=(url, cache_file, config),
-            daemon=True,
-        ).start()
-        crl = parse_crl_bytes(data)
-        if issuer_certs is not None:
-            verify_crl(crl, issuer_certs, strict=config.strict)
-        return crl
+        if lock.acquire(blocking=False):
+            logger.debug(
+                "CRL stale (%.0fs old) for %s -- serving cache, refreshing in background",
+                age,
+                url,
+            )
+            try:
+                threading.Thread(
+                    target=_refresh_crl_background,
+                    args=(url, cache_file, config, issuer_certs, lock),
+                    daemon=True,
+                ).start()
+            except BaseException:
+                # The lock is released only by the thread.  If it never
+                # started, release it here or every later fetch of this URL
+                # blocks forever.  Serving the stale copy is still correct.
+                lock.release()
+                logger.exception("Could not start background CRL refresh for %s", url)
+        else:
+            logger.debug("CRL stale for %s -- refresh already in progress", url)
+        return _load_verified(data, issuer_certs, config)
 
     logger.debug("No CRL cache for %s -- fetching synchronously", url)
-    return refresh_crl(url, cache_file, config)
+    return _refresh_once(url, cache_file, config, issuer_certs, lock)
 
 
-def _refresh_crl_background(url: str, cache_file: Path, config: CRLConfig) -> None:
+# One lock per cache file, so concurrent requests for the same CRL share a
+# single fetch instead of each downloading it.
+_refresh_locks: dict[Path, threading.Lock] = {}
+_refresh_locks_guard = threading.Lock()
+
+
+def _refresh_lock(cache_file: Path) -> threading.Lock:
+    """Return the lock serialising fetches for *cache_file*."""
+    with _refresh_locks_guard:
+        return _refresh_locks.setdefault(cache_file, threading.Lock())
+
+
+def _read_cache(cache_file: Path) -> tuple[bytes | None, float]:
+    """Return ``(data, age_seconds)``, or ``(None, inf)`` if not cached."""
+    try:
+        age = time.time() - cache_file.stat().st_mtime
+        return cache_file.read_bytes(), age
+    except FileNotFoundError:
+        return None, float("inf")
+
+
+def _load_verified(
+    data: bytes,
+    issuer_certs: list[x509.Certificate] | None,
+    config: CRLConfig,
+) -> x509.CertificateRevocationList:
+    """Parse cached CRL bytes and verify them when *issuer_certs* is given."""
+    crl = parse_crl_bytes(data)
+    if issuer_certs is not None:
+        verify_crl(crl, issuer_certs, strict=config.strict)
+    return crl
+
+
+def _refresh_once(
+    url: str,
+    cache_file: Path,
+    config: CRLConfig,
+    issuer_certs: list[x509.Certificate] | None,
+    lock: threading.Lock,
+) -> x509.CertificateRevocationList:
+    """Fetch synchronously, unless a concurrent caller just refreshed the cache."""
+    with lock:
+        data, age = _read_cache(cache_file)
+        if data is not None and age < config.cache_ttl:
+            logger.debug("CRL for %s refreshed by a concurrent caller", url)
+            return _load_verified(data, issuer_certs, config)
+        return refresh_crl(url, cache_file, config, issuer_certs=issuer_certs)
+
+
+def _refresh_crl_background(
+    url: str,
+    cache_file: Path,
+    config: CRLConfig,
+    issuer_certs: list[x509.Certificate] | None = None,
+    lock: threading.Lock | None = None,
+) -> None:
     """Wrapper for background CRL refresh that logs exceptions.
 
     Raises CRLRefreshError so that callers using a custom thread pool or
     callback mechanism can observe the failure. In the default daemon-thread
     usage, the exception is logged and then discarded.
+
+    If *lock* is given it is held by the caller on this thread's behalf and is
+    released when the refresh finishes, successfully or not.
     """
     try:
-        refresh_crl(url, cache_file, config)
+        refresh_crl(url, cache_file, config, issuer_certs=issuer_certs)
     except Exception as e:
         logger.error("Background CRL refresh failed for %s: %s", url, e)
         raise CRLRefreshError(f"Background CRL refresh failed for {url}: {e}") from e
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 def refresh_crl(
-    url: str, cache_file: Path, config: CRLConfig | None = None
+    url: str,
+    cache_file: Path,
+    config: CRLConfig | None = None,
+    issuer_certs: list[x509.Certificate] | None = None,
 ) -> x509.CertificateRevocationList:
     """Fetch a CRL from url, write it to cache_file, and return parsed CRL.
 
     Called directly (blocking) when no cache exists, or from ``_refresh_crl_background``
     when the cache is stale.  Raises ``ValueError`` if the response exceeds
-    ``config.max_crl_bytes``.
+    ``config.max_crl_bytes`` or ``config.fetch_timeout``.
+
+    If *issuer_certs* is provided, the CRL is verified with :func:`verify_crl`
+    **before** it is written to the cache.  In strict mode a CRL that fails
+    verification raises ``CertificateError`` and the existing cache is left
+    untouched.  In non-strict mode the unverified CRL is returned but still
+    not cached, so it cannot persist beyond this call.
     """
     if config is None:
         config = CRLConfig()
     try:
-        resp = httpx.get(url, timeout=config.fetch_timeout, follow_redirects=True)
-        resp.raise_for_status()
-        data = resp.content
-        if len(data) > config.max_crl_bytes:
-            raise ValueError(
-                f"CRL from {url} exceeds size limit ({len(data)} > {config.max_crl_bytes} bytes)"
-            )
+        data = fetch_bytes(
+            url,
+            max_bytes=config.max_crl_bytes,
+            timeout=config.fetch_timeout,
+        )
         crl = parse_crl_bytes(data)
-        tmp = cache_file.with_suffix(".tmp")
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        try:
-            os.write(fd, data)
-        finally:
-            os.close(fd)
-        tmp.rename(cache_file)
+        if issuer_certs is not None and not verify_crl(crl, issuer_certs, strict=config.strict):
+            return crl
+        _write_cache(cache_file, data)
         logger.debug("CRL cached from %s (%d bytes)", url, len(data))
         return crl
     except CertificateError:
         raise
     except Exception as e:
         logger.error("Failed to fetch/cache CRL from %s: %s", url, e)
+        raise
+
+
+def _write_cache(cache_file: Path, data: bytes) -> None:
+    """Atomically replace *cache_file* with *data* (mode 0600).
+
+    The temporary file has a unique name, so concurrent writers never share
+    or truncate each other's partial output.
+    """
+    fd, tmp = tempfile.mkstemp(dir=cache_file.parent, prefix=cache_file.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, cache_file)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
         raise
 
 
@@ -324,11 +429,19 @@ def parse_crl_bytes(data: bytes) -> x509.CertificateRevocationList:
         raise CertificateError(f"Failed to parse CRL: {e}") from e
 
 
-def prefetch_crls(cert: x509.Certificate, config: CRLConfig) -> dict[str, str]:
+def prefetch_crls(
+    cert: x509.Certificate,
+    config: CRLConfig,
+    issuer_certs: list[x509.Certificate] | None = None,
+) -> dict[str, str]:
     """Proactively fetch and cache CRLs for a certificate.
 
     Intended for scheduled invocation (cron / Lambda) to keep the CRL cache
     warm so that real requests never block on a network fetch.
+
+    Pass *issuer_certs* so that each CRL is verified before it is cached;
+    without it a forged CRL can be cached and then rejected by every
+    verifying lookup until the next refresh.
 
     Returns a dict mapping each CRL URL to "refreshed", "skipped (fresh)",
     or "error: <message>".
@@ -350,7 +463,8 @@ def prefetch_crls(cert: x509.Certificate, config: CRLConfig) -> dict[str, str]:
                 results[url] = "skipped (fresh)"
                 continue
         try:
-            refresh_crl(url, cache_file, config)
+            with _refresh_lock(cache_file):
+                refresh_crl(url, cache_file, config, issuer_certs=issuer_certs)
             results[url] = "refreshed"
         except Exception as e:
             results[url] = f"error: {e}"

@@ -1,11 +1,14 @@
 """X.509 certificate parsing utilities."""
 
+from __future__ import annotations
+
 import logging
 import re
 from datetime import UTC, datetime
 from hashlib import sha256
 
 from cryptography import x509
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509.oid import ExtensionOID, NameOID
 
@@ -100,6 +103,17 @@ def extract_san_fascn(cert: x509.Certificate) -> str | None:
     except Exception:
         logger.warning("Unexpected error extracting FASC-N from SAN", exc_info=True)
     return None
+
+
+def is_self_signed(cert: x509.Certificate) -> bool:
+    """Return True if *cert* is self-issued and verifies under its own key."""
+    if cert.subject != cert.issuer:
+        return False
+    try:
+        cert.verify_directly_issued_by(cert)
+    except (ValueError, TypeError, InvalidSignature):
+        return False
+    return True
 
 
 def cert_fingerprint(cert: x509.Certificate) -> str:

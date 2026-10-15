@@ -20,8 +20,8 @@ class TestSelectEdipiFirst:
         assert select_edipi_first(identity) == "fascn:abc123"
 
     def test_dn_fallback(self):
-        identity = CertIdentity(subject_dn="CN=TEST")
-        assert select_edipi_first(identity) == "dn:CN=TEST"
+        identity = CertIdentity(subject_dn="CN=TEST", cert_issuer_dn="CN=CA")
+        assert select_edipi_first(identity) == "dn:CN=CA;CN=TEST"
 
 
 class TestSelectUuidFirst:
@@ -36,8 +36,8 @@ class TestSelectUuidFirst:
         assert select_uuid_first(identity) == "edipi:999"
 
     def test_dn_fallback(self):
-        identity = CertIdentity(subject_dn="CN=TEST")
-        assert select_uuid_first(identity) == "dn:CN=TEST"
+        identity = CertIdentity(subject_dn="CN=TEST", cert_issuer_dn="CN=CA")
+        assert select_uuid_first(identity) == "dn:CN=CA;CN=TEST"
 
 
 class TestSelectEmailFirst:
@@ -46,5 +46,5 @@ class TestSelectEmailFirst:
         assert select_email_first(identity) == "email:user@example.com"
 
     def test_dn_fallback(self):
-        identity = CertIdentity(subject_dn="CN=TEST")
-        assert select_email_first(identity) == "dn:CN=TEST"
+        identity = CertIdentity(subject_dn="CN=TEST", cert_issuer_dn="CN=CA")
+        assert select_email_first(identity) == "dn:CN=CA;CN=TEST"

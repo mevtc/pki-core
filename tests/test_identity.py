@@ -1,7 +1,13 @@
 """Tests for pki.core.identity."""
 
 from pki.core.identity import parse_identity
-from pki.core.providers import AuthProvider, IntendedUse, ProviderRegistry
+from pki.core.providers import (
+    AuthProvider,
+    HeuristicRule,
+    IntendedUse,
+    MatchOutcome,
+    ProviderRegistry,
+)
 
 
 def _test_parser(identity):
@@ -71,7 +77,7 @@ class TestParseIdentityWithProvider:
         assert identity.lastname == "SMITH"
         assert identity.firstname == "JOHN"
         assert identity.edipi == "1234567890"
-        assert identity.primary_id == "edipi:1234567890"
+        assert identity.primary_id == "TEST_CAC:edipi:1234567890"
 
     def test_default_intended_use_is_personal_auth(self, cac_cert):
         provider = AuthProvider(
@@ -102,3 +108,89 @@ class TestParseIdentityWithProvider:
         identity = parse_identity(cac_cert, registry=reg)
         assert identity.intended_use == (IntendedUse.NPE_AUTH | IntendedUse.OBJECT_SIGNING)
         assert IntendedUse.PERSONAL_AUTH not in identity.intended_use
+
+
+class TestHeuristicCannotOverturnPolicyOids:
+    """A subject heuristic must not re-admit a certificate the OIDs ruled out.
+
+    cac_cert asserts 2.16.840.1.101.2.1.11.19.  Each provider below lists that
+    OID as disqualifying -- standing in for a device certificate that also
+    asserts a person OID -- while its CN heuristic matches the subject.
+    """
+
+    OID = "2.16.840.1.101.2.1.11.19"
+
+    def _person(self, name="PERSON", auth_oids=None):
+        return AuthProvider(
+            name=name,
+            display_name=name,
+            auth_oids=frozenset(auth_oids if auth_oids is not None else {self.OID}),
+            cn_parser=_test_parser,
+            primary_id_selector=_test_selector,
+            heuristics=(HeuristicRule(field="cn", pattern=r"^[A-Z]+\.", is_regex=True),),
+            disqualifying_oids=frozenset({self.OID}),
+        )
+
+    def test_disqualified_certificate_stays_unknown(self, cac_cert):
+        reg = ProviderRegistry()
+        reg.register(self._person())
+        assert reg.resolve({self.OID}).outcome is MatchOutcome.DISQUALIFIED
+
+        identity = parse_identity(cac_cert, registry=reg)
+        assert identity.credential_type == "UNKNOWN"
+        assert identity.intended_use is None
+        assert identity.primary_id.startswith("dn:")
+
+    def test_heuristic_skips_disqualified_provider(self, cac_cert):
+        """No provider claims the OID, but the heuristic match is still vetoed."""
+        reg = ProviderRegistry()
+        reg.register(self._person(auth_oids={"9.9.9"}))
+        assert reg.resolve({self.OID}).outcome is MatchOutcome.NO_MATCH
+
+        identity = parse_identity(cac_cert, registry=reg)
+        assert identity.credential_type == "UNKNOWN"
+
+    def test_ambiguous_certificate_stays_unknown(self, cac_cert):
+        # Two composite use classes: neither is in _USE_PRECEDENCE, so the
+        # conflict cannot be resolved and must not fall through to GUESS.
+        reg = ProviderRegistry()
+        for name, use in (
+            ("A", IntendedUse.PERSONAL_AUTH | IntendedUse.NPE_AUTH),
+            ("B", IntendedUse.PERSONAL_AUTH | IntendedUse.ENCRYPTION),
+        ):
+            reg.register(
+                AuthProvider(
+                    name=name,
+                    display_name=name,
+                    auth_oids=frozenset({self.OID}),
+                    cn_parser=_test_parser,
+                    primary_id_selector=_test_selector,
+                    intended_use=use,
+                )
+            )
+        reg.register(
+            AuthProvider(
+                name="GUESS",
+                display_name="GUESS",
+                auth_oids=frozenset({"9.9.9"}),
+                cn_parser=_test_parser,
+                primary_id_selector=_test_selector,
+                heuristics=(HeuristicRule(field="cn", pattern=r"^[A-Z]+\.", is_regex=True),),
+            )
+        )
+        assert reg.resolve({self.OID}).outcome is MatchOutcome.AMBIGUOUS
+        assert parse_identity(cac_cert, registry=reg).credential_type == "UNKNOWN"
+
+    def test_no_match_still_falls_back(self, cac_cert):
+        reg = ProviderRegistry()
+        reg.register(
+            AuthProvider(
+                name="GUESS",
+                display_name="GUESS",
+                auth_oids=frozenset({"9.9.9"}),
+                cn_parser=_test_parser,
+                primary_id_selector=_test_selector,
+                heuristics=(HeuristicRule(field="cn", pattern=r"^[A-Z]+\.", is_regex=True),),
+            )
+        )
+        assert parse_identity(cac_cert, registry=reg).credential_type == "GUESS"

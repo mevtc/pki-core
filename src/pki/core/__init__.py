@@ -3,7 +3,15 @@
 from .algorithms import AlgorithmPolicy
 from .certificate import CertificateError
 from .crl import CRLRefreshError
-from .providers import AuthProvider, HeuristicRule, IntendedUse, ProviderRegistry, TrustStoreSource
+from .providers import (
+    AuthProvider,
+    HeuristicRule,
+    IntendedUse,
+    MatchOutcome,
+    ProviderMatch,
+    ProviderRegistry,
+    TrustStoreSource,
+)
 from .revocation import CRL, OCSP, RevocationCheck, RevocationPolicy, RevocationResult
 from .trust_store import build_bundle_for_provider
 from .validation import (
@@ -24,6 +32,8 @@ __all__ = [
     "CertificatePolicy",
     "HeuristicRule",
     "IntendedUse",
+    "MatchOutcome",
+    "ProviderMatch",
     "ProviderRegistry",
     "RevocationCheck",
     "RevocationPolicy",

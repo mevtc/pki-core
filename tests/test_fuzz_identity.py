@@ -170,9 +170,9 @@ class TestFuzzSelectEdpiFirst:
         assert result == "fascn:test-fascn"
 
     def test_falls_through_to_dn(self):
-        identity = CertIdentity(subject_dn="CN=test")
+        identity = CertIdentity(subject_dn="CN=test", cert_issuer_dn="CN=CA")
         result = select_edipi_first(identity)
-        assert result == "dn:CN=test"
+        assert result == "dn:CN=CA;CN=test"
 
 
 class TestFuzzSelectUuidFirst:
@@ -207,9 +207,9 @@ class TestFuzzSelectUuidFirst:
         assert result == "edipi:test-edipi"
 
     def test_falls_through_to_dn(self):
-        identity = CertIdentity(subject_dn="CN=test")
+        identity = CertIdentity(subject_dn="CN=test", cert_issuer_dn="CN=CA")
         result = select_uuid_first(identity)
-        assert result == "dn:CN=test"
+        assert result == "dn:CN=CA;CN=test"
 
 
 class TestFuzzSelectEmailFirst:
@@ -229,6 +229,6 @@ class TestFuzzSelectEmailFirst:
         assert result == f"email:{email}"
 
     def test_falls_through_to_dn(self):
-        identity = CertIdentity(subject_dn="CN=test")
+        identity = CertIdentity(subject_dn="CN=test", cert_issuer_dn="CN=CA")
         result = select_email_first(identity)
-        assert result == "dn:CN=test"
+        assert result == "dn:CN=CA;CN=test"

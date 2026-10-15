@@ -4,18 +4,20 @@ Downloads, parses, deduplicates, and merges CA certificate bundles
 from provider-defined trust store sources.
 """
 
+from __future__ import annotations
+
 import io
 import logging
 import zipfile
 from pathlib import Path
 
-import httpx
 from cryptography.hazmat.primitives.serialization.pkcs7 import (
     load_der_pkcs7_certificates,
     load_pem_pkcs7_certificates,
 )
 from cryptography.x509 import load_der_x509_certificate
 
+from ._http import fetch_bytes
 from .certificate import cert_fingerprint, cert_to_pem
 from .providers import ProviderRegistry
 
@@ -34,22 +36,18 @@ MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 def download(url: str, timeout: int = 60, max_bytes: int = MAX_DOWNLOAD_BYTES) -> bytes:
     """Download a URL and return raw bytes.
 
-    Raises ``ValueError`` if the response exceeds *max_bytes*.
+    Raises ``ValueError`` if the response exceeds *max_bytes* or *timeout*.
+    The body is streamed, so at most *max_bytes* is ever held in memory.
     """
     logger.info("Downloading %s", url)
-    resp = httpx.get(
+    data = fetch_bytes(
         url,
+        max_bytes=max_bytes,
         timeout=timeout,
-        follow_redirects=True,
         headers={"User-Agent": USER_AGENT},
     )
-    resp.raise_for_status()
-    if len(resp.content) > max_bytes:
-        raise ValueError(
-            f"Download from {url} exceeds size limit ({len(resp.content)} > {max_bytes} bytes)"
-        )
-    logger.info("Downloaded %d bytes from %s", len(resp.content), url)
-    return resp.content
+    logger.info("Downloaded %d bytes from %s", len(data), url)
+    return data
 
 
 def fetch_trust_store_source(source) -> list:
@@ -87,7 +85,17 @@ def _fetch_pkcs7_zip(url: str) -> list:
             if not str(target).startswith(str(cwd)):
                 logger.warning("Skipping zip entry with path traversal: %s", name)
                 continue
-            p7_data = zf.read(name)
+            # The download cap bounds the compressed archive only; bound each
+            # member's decompressed size too, or a small ZIP can expand
+            # without limit.  ZipExtFile stops at the declared file_size.
+            if zf.getinfo(name).file_size > MAX_DOWNLOAD_BYTES:
+                logger.warning("Skipping oversized ZIP entry: %s", name)
+                continue
+            with zf.open(name) as member:
+                p7_data = member.read(MAX_DOWNLOAD_BYTES + 1)
+            if len(p7_data) > MAX_DOWNLOAD_BYTES:
+                logger.warning("Skipping oversized ZIP entry: %s", name)
+                continue
             try:
                 parsed = load_pem_pkcs7_certificates(p7_data)
                 certs.extend(parsed)

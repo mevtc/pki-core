@@ -11,7 +11,7 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Flag, auto
+from enum import Enum, Flag, auto
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -78,6 +78,29 @@ _USE_PRECEDENCE: tuple[IntendedUse, ...] = (
 )
 
 
+class MatchOutcome(Enum):
+    """How :meth:`ProviderRegistry.resolve` arrived at its answer.
+
+    Only ``NO_MATCH`` permits a heuristic fallback.  ``DISQUALIFIED`` and
+    ``AMBIGUOUS`` are decisions the policy OIDs made; a guess from subject
+    strings -- attacker-influenced data in a certificate not yet trusted --
+    must not overturn them.
+    """
+
+    MATCHED = "matched"
+    NO_MATCH = "no_match"
+    DISQUALIFIED = "disqualified"
+    AMBIGUOUS = "ambiguous"
+
+
+@dataclass(frozen=True)
+class ProviderMatch:
+    """The result of :meth:`ProviderRegistry.resolve`."""
+
+    outcome: MatchOutcome
+    provider: AuthProvider | None = None
+
+
 @dataclass(frozen=True)
 class HeuristicRule:
     """A single heuristic for guessing credential type from cert fields."""
@@ -123,6 +146,15 @@ class AuthProvider:
     # is registered — in a registry constrained to PERSONAL_AUTH there is none,
     # so the person provider must be able to rule *itself* out.
     disqualifying_oids: frozenset[str] = frozenset()
+    # SHA-256 fingerprints (lowercase hex, DER) of the root CAs authoritative
+    # for this provider's identifiers.  When non-empty and the chain was
+    # validated, validate_certificate() rejects a certificate whose chain ends
+    # at any other anchor -- an EDIPI means something only under a DoD root.
+    trust_anchor_fingerprints: frozenset[str] = frozenset()
+    # RFC 4514 subjects of bridge CAs on this provider's paths.  A chain that
+    # crosses one is scoped to the cross-certified root below it (e.g. one
+    # PIV-I issuer), so issuers sharing an anchor cannot share identifiers.
+    bridge_ca_subjects: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -187,7 +219,15 @@ class ProviderRegistry:
         return list(self._providers.keys())
 
     def match_oids(self, policy_oids: set[str]) -> AuthProvider | None:
-        """Return the provider matching ``policy_oids``, least-privileged first.
+        """Return the provider matching ``policy_oids``, or ``None``.
+
+        ``None`` conflates *no match*, *disqualified* and *ambiguous*; use
+        :meth:`resolve` when the difference matters (it does for any fallback).
+        """
+        return self.resolve(policy_oids).provider
+
+    def resolve(self, policy_oids: set[str]) -> ProviderMatch:
+        """Resolve ``policy_oids`` to a provider, least-privileged first.
 
         A certificate may legitimately assert policy OIDs from more than one
         use class.  DoD CP v11 Section 1.2 is explicit: "All NPE certificates
@@ -212,22 +252,22 @@ class ProviderRegistry:
             policy_oids: Certificate policy OIDs from the certificate.
 
         Returns:
-            The matching provider, or ``None`` if nothing matched or the match
-            was ambiguous.
+            ``MATCHED`` with the provider; ``DISQUALIFIED`` when providers
+            claimed the OIDs but every one ruled itself out; ``AMBIGUOUS``
+            when the matches conflict; otherwise ``NO_MATCH``.
         """
-        matches = [
-            p
-            for p in self._providers.values()
-            if policy_oids & p.auth_oids and not (policy_oids & p.disqualifying_oids)
-        ]
+        claimed = [p for p in self._providers.values() if policy_oids & p.auth_oids]
+        matches = [p for p in claimed if not (policy_oids & p.disqualifying_oids)]
         if not matches:
-            return None
+            if claimed:
+                return ProviderMatch(MatchOutcome.DISQUALIFIED)
+            return ProviderMatch(MatchOutcome.NO_MATCH)
 
         uses = {p.intended_use for p in matches}
         if len(uses) == 1:
             # Unambiguous: every match agrees on the use class, so registration
             # order is a presentation detail rather than a security decision.
-            return matches[0]
+            return ProviderMatch(MatchOutcome.MATCHED, matches[0])
 
         for use in _USE_PRECEDENCE:
             for provider in matches:
@@ -239,23 +279,30 @@ class ProviderRegistry:
                         ", ".join(sorted(u.name or str(u) for u in uses)),
                         provider.name,
                     )
-                    return provider
+                    return ProviderMatch(MatchOutcome.MATCHED, provider)
 
         logger.warning(
             "Certificate policy OIDs matched providers with conflicting "
             "intended_use (%s) and no precedence applies; refusing to classify",
             ", ".join(sorted(str(u) for u in uses)),
         )
-        return None
+        return ProviderMatch(MatchOutcome.AMBIGUOUS)
 
     def match_heuristic(
         self,
         cn: str | None,
         org: str | None,
         ou: str | None,
+        policy_oids: set[str] | None = None,
     ) -> AuthProvider | None:
-        """Return the first provider matched by heuristic rules."""
+        """Return the first provider matched by heuristic rules.
+
+        A provider disqualified by ``policy_oids`` is never matched: a subject
+        string may narrow a classification, never grant what the OIDs withheld.
+        """
         for provider in self._providers.values():
+            if policy_oids and policy_oids & provider.disqualifying_oids:
+                continue
             compiled = self._compiled_patterns.get(provider.name, {})
             for rule in provider.heuristics:
                 value = {"cn": cn, "org": org, "ou": ou}.get(rule.field)

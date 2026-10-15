@@ -116,25 +116,20 @@ class TestDownload:
         mock_resp = MagicMock()
         mock_resp.content = b"test data"
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             data = download("https://example.com/bundle.p7c")
             assert data == b"test data"
 
-    def test_exceeds_max_bytes(self):
-        """Download exceeding max_bytes raises ValueError."""
-        mock_resp = MagicMock()
-        mock_resp.content = b"x" * 100
-        mock_resp.raise_for_status = MagicMock()
-        with (
-            patch("pki.core.trust_store.httpx.get", return_value=mock_resp),
-            pytest.raises(ValueError, match="exceeds size limit"),
-        ):
+    def test_max_bytes_passed_to_fetch(self):
+        """max_bytes bounds the fetch itself rather than a buffered body."""
+        with patch("pki.core.trust_store.fetch_bytes", return_value=b"x") as fetch:
             download("https://example.com/big.p7c", max_bytes=10)
+        assert fetch.call_args.kwargs["max_bytes"] == 10
 
     def test_network_error_propagates(self):
         """Network error propagates from httpx."""
         with (
-            patch("pki.core.trust_store.httpx.get", side_effect=httpx.ConnectError("refused")),
+            patch("pki.core.trust_store.fetch_bytes", side_effect=httpx.ConnectError("refused")),
             pytest.raises(httpx.ConnectError),
         ):
             download("https://example.com/bundle.p7c")
@@ -154,7 +149,7 @@ class TestFetchTrustStoreSource:
         mock_resp = MagicMock()
         mock_resp.content = p7_data
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             certs = fetch_trust_store_source(source)
             assert len(certs) == 1
 
@@ -166,7 +161,7 @@ class TestFetchTrustStoreSource:
         mock_resp = MagicMock()
         mock_resp.content = der_data
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             certs = fetch_trust_store_source(source)
             assert len(certs) == 1
 
@@ -182,7 +177,7 @@ class TestFetchTrustStoreSource:
         mock_resp = MagicMock()
         mock_resp.content = zip_bytes
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             certs = fetch_trust_store_source(source)
             assert len(certs) >= 1
 
@@ -200,7 +195,7 @@ class TestFetchTrustStoreSource:
         mock_resp = MagicMock()
         mock_resp.content = zip_bytes
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             certs = fetch_trust_store_source(source)
             assert certs == []
 
@@ -215,7 +210,7 @@ class TestFetchTrustStoreSource:
         mock_resp = MagicMock()
         mock_resp.content = zip_bytes
         mock_resp.raise_for_status = MagicMock()
-        with patch("pki.core.trust_store.httpx.get", return_value=mock_resp):
+        with patch("pki.core.trust_store.fetch_bytes", return_value=mock_resp.content):
             certs = fetch_trust_store_source(source)
             assert certs == []
 
